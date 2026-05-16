@@ -1,0 +1,50 @@
+# Deploy `{{connectorId}}`
+
+Two deployment options are emitted. **Neither is executed automatically** — run them yourself when ready.
+
+## Option A — Azure Functions (recommended)
+
+Lightweight consumption plan. Best fit for timer-triggered crawls.
+
+```powershell
+cd deploy/azure-functions
+./deploy.ps1 `
+  -ResourceGroup "{{connectorId}}-rg" `
+  -Location "eastus" `
+  -FunctionAppName "{{connectorId}}-func" `
+  -StorageAccountName "{{connectorId}}stor" `
+  -TenantId "{{tenantId}}" `
+  -ClientId "{{clientId}}" `
+  -UseManagedIdentity
+```
+
+If you do not use managed identity, omit `-UseManagedIdentity` and pass `-ClientSecret <value>` or set `CLIENT_SECRET` in app settings via Key Vault reference.
+
+## Option B — Azure Container Apps
+
+Containerized runtime. Pick this if you need long-running ingestion or custom scaling.
+
+```powershell
+cd deploy/azure-container-apps
+./deploy.ps1 `
+  -ResourceGroup "{{connectorId}}-rg" `
+  -Location "eastus" `
+  -AcrName "{{connectorId}}acr" `
+  -ConnectorId "{{connectorId}}" `
+  -TenantId "{{tenantId}}" `
+  -ClientId "{{clientId}}" `
+  -UseManagedIdentity
+```
+
+## After deploy
+
+1. Trigger the crawl. For Functions, hit the `crawlHttp` endpoint with a POST or wait for the timer. For Container Apps, run `npm run ingest` against the deployed image.
+2. Enable **Include connector results for inline results** in M365 Admin Center → Search & intelligence → Data sources.
+3. Optionally run the `eval-score` step from the orchestrator (or `eval-score --connector-id {{connectorId}} ...`) to measure Copilot's answer quality.
+
+## Security checklist
+
+- Use **managed identity** in production. Local secrets are only for development.
+- Store the client secret in **Key Vault** with a `@Microsoft.KeyVault(...)` reference.
+- The default ACL mode is `{{aclMode}}`. Review before exposing non-public data.
+- Restrict the function HTTP trigger to the `function` auth level shown in `crawl.ts`.

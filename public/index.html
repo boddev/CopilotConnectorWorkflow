@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Copilot Connector Workflow</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>Copilot Connector Workflow</h1>
+    <div id="tools-status"></div>
+  </header>
+  <main>
+    <section id="new-job">
+      <h2>New job</h2>
+      <form id="job-form">
+        <label>Dataset path<input name="dataset" required placeholder="C:\path\to\dataset"></label>
+        <label>Description<textarea name="description" required rows="3" placeholder="What does this dataset contain?"></textarea></label>
+        <label>Eval prompts<input name="count" type="number" value="30" min="5" max="50"></label>
+        <label>File extensions (optional, comma-separated)<input name="extensions" placeholder="csv,json"></label>
+        <label>Connector ID<input name="connectorId" required placeholder="myconnector123" pattern="[A-Za-z0-9]{3,128}"></label>
+        <label>Connector display name<input name="connectorName" required placeholder="My Connector"></label>
+        <label>Connector description (optional)<textarea name="connectorDescription" rows="2"></textarea></label>
+        <label>Deploy target
+          <select name="deployTarget">
+            <option value="azure-functions">Azure Functions</option>
+            <option value="azure-container-apps">Azure Container Apps</option>
+            <option value="both">Both</option>
+          </select>
+        </label>
+        <label>Mode
+          <select name="mode" id="mode-select">
+            <option value="build">Build only (no tenant access)</option>
+            <option value="provision">Provision + ingest (requires credentials)</option>
+          </select>
+        </label>
+        <label>ACL mode
+          <select name="aclMode">
+            <option value="everyone">everyone</option>
+            <option value="everyoneExceptGuests">everyoneExceptGuests</option>
+            <option value="none">none (preserve item ACLs)</option>
+          </select>
+        </label>
+        <fieldset id="auth-fields" hidden>
+          <legend>Authentication (provision mode)</legend>
+          <label>Tenant ID<input name="tenantId"></label>
+          <label>Client ID<input name="clientId"></label>
+          <label>Client secret env var<input name="clientSecretEnvVar" placeholder="MY_CONNECTOR_SECRET"></label>
+          <label><input name="useManagedIdentity" type="checkbox"> Use managed identity</label>
+          <p class="hint">Required Graph permissions (application + admin consent):
+            <code>ExternalConnection.ReadWrite.OwnedBy</code>,
+            <code>ExternalItem.ReadWrite.OwnedBy</code>.</p>
+        </fieldset>
+        <fieldset id="m365eval-fields" hidden>
+          <legend>Step 6 — @microsoft/m365-copilot-eval</legend>
+          <label><input name="runM365Eval" type="checkbox" id="run-m365-eval-cb"> Run scoring after ingest</label>
+          <div id="m365eval-detail" hidden>
+            <label>M365 Agent ID<input name="m365AgentId" placeholder="agent-guid"></label>
+            <label>System prompt file (optional)<input name="m365SystemPromptFile" placeholder="..\prompts\my-system-prompt.md"></label>
+            <label>Evaluators (comma-separated, default: Relevance,Coherence,Groundedness,Citations)
+              <input name="m365Evaluators" placeholder="Relevance,Coherence,Groundedness,Citations">
+            </label>
+            <label>Concurrency<input name="m365Concurrency" type="number" min="1" max="8" value="1"></label>
+            <label>Environment<input name="m365Environment" value="local"></label>
+            <label>Package version<input name="m365PackageVersion" value="latest"></label>
+            <label>Log level
+              <select name="m365LogLevel">
+                <option>info</option><option>debug</option><option>warning</option><option>error</option>
+              </select>
+            </label>
+            <label><input name="m365AcceptEula" type="checkbox"> Accept EULA (required on first use)</label>
+            <p class="hint">Requires Node.js ≥ 22.21.1. The agent ID is an M365 *agent* ID, not the connector ID. Step 6 runs only in provision mode.</p>
+          </div>
+        </fieldset>
+        <button type="submit">Run pipeline</button>
+      </form>
+    </section>
+    <section id="job-list">
+      <h2>Jobs</h2>
+      <ul id="jobs"></ul>
+    </section>
+    <section id="job-detail">
+      <h2>Selected job</h2>
+      <div id="detail">Select a job to view progress.</div>
+      <h3>Live log</h3>
+      <pre id="log"></pre>
+    </section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

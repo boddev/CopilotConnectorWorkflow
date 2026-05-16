@@ -1,0 +1,24 @@
+{
+  "name": "{{connectorId}}",
+  "version": "0.1.0",
+  "private": true,
+  "description": "{{connectorDescription}}",
+  "main": "dist/src/functions/crawl.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "func start",
+    "provision": "node dist/src/scripts/provision.js",
+    "ingest": "node dist/src/scripts/ingest.js",
+    "deprovision": "node dist/src/scripts/deprovision.js"
+  },
+  "dependencies": {
+    "@azure/functions": "^4.5.0",
+    "@azure/identity": "^4.4.1",
+    "@microsoft/microsoft-graph-client": "^3.0.7",
+    "isomorphic-fetch": "^3.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0"
+  }
+}

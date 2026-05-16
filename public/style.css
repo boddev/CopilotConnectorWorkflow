@@ -1,0 +1,31 @@
+* { box-sizing: border-box; }
+body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; background: #f4f6f8; color: #222; }
+header { background: #0f4c81; color: white; padding: 12px 24px; display: flex; justify-content: space-between; align-items: center; }
+header h1 { font-size: 1.2rem; margin: 0; }
+#tools-status { font-size: 0.85rem; }
+#tools-status .bad { color: #ffd1d1; }
+main { display: grid; grid-template-columns: 360px 320px 1fr; gap: 16px; padding: 16px; }
+section { background: white; border-radius: 6px; padding: 12px 14px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); min-height: 80vh; }
+section h2 { font-size: 1rem; margin: 0 0 8px; border-bottom: 1px solid #ddd; padding-bottom: 4px; }
+label { display: block; margin: 6px 0; font-size: 0.85rem; }
+input, textarea, select { width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 3px; font-family: inherit; font-size: 0.9rem; }
+input[type=checkbox] { width: auto; margin-right: 4px; }
+fieldset { border: 1px solid #ccc; margin-top: 8px; padding: 8px; border-radius: 4px; }
+legend { padding: 0 4px; font-size: 0.8rem; color: #555; }
+.hint { font-size: 0.75rem; color: #555; margin: 4px 0 0; }
+button { background: #0f4c81; color: white; border: 0; padding: 8px 16px; border-radius: 3px; cursor: pointer; margin-top: 8px; }
+button:hover { background: #0d3e6a; }
+#jobs { list-style: none; padding: 0; margin: 0; }
+#jobs li { padding: 6px 8px; border-bottom: 1px solid #eee; cursor: pointer; font-size: 0.85rem; }
+#jobs li:hover { background: #f0f4f8; }
+#jobs li.active { background: #dbe9f5; }
+.step-row { display: flex; justify-content: space-between; padding: 2px 4px; font-size: 0.85rem; }
+.step-row .status { font-weight: bold; }
+.status-pending { color: #888; }
+.status-running { color: #d18a00; }
+.status-done { color: #2e7d32; }
+.status-failed { color: #c62828; }
+.status-skipped { color: #777; }
+.artifact-link { display: block; font-size: 0.8rem; color: #0f4c81; text-decoration: none; padding: 2px 0; }
+.artifact-link:hover { text-decoration: underline; }
+#log { background: #1e1e1e; color: #d4d4d4; padding: 8px; border-radius: 3px; max-height: 60vh; overflow: auto; font-family: Consolas, monospace; font-size: 0.78rem; white-space: pre-wrap; }

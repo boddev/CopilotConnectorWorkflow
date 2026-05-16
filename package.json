@@ -1,0 +1,29 @@
+{
+  "name": "copilot-connector-workflow",
+  "version": "0.1.0",
+  "description": "End-to-end orchestrator + GUI: dataset -> eval set -> enhanced records -> schema -> Copilot Connector project -> Azure deploy artifacts.",
+  "private": true,
+  "bin": {
+    "ccw": "dist/cli.js"
+  },
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "lint": "tsc --noEmit",
+    "start": "node dist/server.js",
+    "cli": "node dist/cli.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "smoke": "node dist/cli.js run --dataset \"..\\EvaluationCLI\\environment-datasets\" --description \"Environmental datasets for the NGO environment Copilot connector, including OWID CO2/GHG metrics plus World Bank climate indicators by country/region and year.\" --count 10 --connector-id ccwenvtest --connector-name \"CCW Env Test\" --mode build"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "busboy": "^1.6.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}

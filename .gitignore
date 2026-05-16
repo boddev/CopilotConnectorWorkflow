@@ -1,0 +1,8 @@
+node_modules/
+dist/
+workspace/jobs/
+workspace/test-dataset/
+*.log
+.env
+.env.local
+setup/.env

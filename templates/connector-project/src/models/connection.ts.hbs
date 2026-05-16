@@ -1,0 +1,13 @@
+export interface ConnectionConfig {
+  connectionId: string;
+  connectionName: string;
+  connectionDescription: string;
+  aclMode: 'everyone' | 'everyoneExceptGuests' | 'none';
+}
+
+export const connection: ConnectionConfig = {
+  connectionId: '{{connectorId}}',
+  connectionName: '{{connectorName}}',
+  connectionDescription: '{{connectorDescription}}',
+  aclMode: '{{aclMode}}',
+};
