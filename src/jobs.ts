@@ -90,7 +90,17 @@ export function validateConfig(c: JobConfig): void {
 export function fileHash(file: string): string {
   if (!fs.existsSync(file) || !fs.statSync(file).isFile()) return '';
   const h = crypto.createHash('sha256');
-  h.update(fs.readFileSync(file));
+  const fd = fs.openSync(file, 'r');
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  try {
+    while (true) {
+      const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, null);
+      if (bytesRead === 0) break;
+      h.update(buffer.subarray(0, bytesRead));
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
   return h.digest('hex').slice(0, 16);
 }
 

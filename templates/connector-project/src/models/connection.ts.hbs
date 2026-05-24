@@ -11,3 +11,15 @@ export const connection: ConnectionConfig = {
   connectionDescription: '{{connectorDescription}}',
   aclMode: '{{aclMode}}',
 };
+
+// ---------------------------------------------------------------------------
+// urlToItemResolver — link unfurling in Teams / Copilot
+//
+// When a user shares a link in Teams or Copilot that matches the pattern,
+// the connector shows an inline preview / Adaptive Card.
+//
+// Reference:
+//   https://learn.microsoft.com/graph/connecting-external-content-manage-connections#urltoitemresolver
+// ---------------------------------------------------------------------------
+{{urlToItemResolverBlock}}
+

@@ -120,11 +120,16 @@ function hardenSchema(suggestionProps: Array<Record<string, unknown>>): GraphCon
       }
     }
     if (prop.labels && !prop.isRetrievable) prop.isRetrievable = true;
+    // Collect property aliases for KQL query assistance and data mapping
+    const aliases = collectAliases(p);
+    if (aliases.length > 0) prop.aliases = aliases;
     if (out.length < 128) out.push(prop);
   }
   // Ensure mandatory title + url labels are present
   ensureLabel(out, 'title', 'title');
   ensureLabel(out, 'url', 'url');
+  // Soft-promote iconUrl if a matching property exists (not auto-injected like title/url)
+  softEnsureIconUrl(out);
   return { baseType: 'microsoft.graph.externalItem', properties: out };
 }
 
@@ -160,6 +165,26 @@ function collectLabels(p: Record<string, unknown>, propName: string): string[] {
   return out;
 }
 
+function collectAliases(p: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  const addAlias = (value: string): void => {
+    if (!/^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(value)) return;
+    if (!out.includes(value)) out.push(value);
+  };
+  if (Array.isArray(p.aliases)) {
+    for (const a of p.aliases) if (typeof a === 'string' && a) addAlias(a);
+  } else if (typeof p.aliases === 'string' && p.aliases) {
+    for (const a of p.aliases.split(',').map((s) => s.trim()).filter(Boolean)) {
+      addAlias(a);
+    }
+  }
+  // Also check 'alternateNames' which some enhancer versions produce
+  if (Array.isArray(p.alternateNames)) {
+    for (const a of p.alternateNames) if (typeof a === 'string' && a) addAlias(a);
+  }
+  return out;
+}
+
 function ensureLabel(props: GraphProperty[], propName: string, label: string): void {
   const existing = props.find((p) => p.labels?.includes(label));
   if (existing) return;
@@ -176,6 +201,16 @@ function ensureLabel(props: GraphProperty[], propName: string, label: string): v
       isRetrievable: true,
       labels: [label],
     });
+  }
+}
+
+/** Promote iconUrl label on a matching property if one exists (never auto-injects). */
+function softEnsureIconUrl(props: GraphProperty[]): void {
+  if (props.find((p) => p.labels?.includes('iconUrl'))) return;
+  const candidate = props.find((p) => p.name === 'iconUrl' || p.name === 'icon_url' || p.name === 'iconurl');
+  if (candidate) {
+    candidate.labels = (candidate.labels || []).concat('iconUrl');
+    candidate.isRetrievable = true;
   }
 }
 
@@ -197,6 +232,11 @@ function validateSchema(schema: GraphConnectorSchema): ValidationIssue[] {
     if (p.name.toLowerCase() === 'content') {
       issues.push({ severity: 'error', message: `'content' is a reserved property; do not declare it in the schema` });
     }
+    for (const alias of p.aliases || []) {
+      if (!/^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(alias)) {
+        issues.push({ severity: 'error', message: `property '${p.name}' alias '${alias}' invalid (must match ^[A-Za-z][A-Za-z0-9_]{0,31}$)` });
+      }
+    }
   }
   // Label uniqueness
   const labelCounts = new Map<string, number>();
@@ -208,6 +248,7 @@ function validateSchema(schema: GraphConnectorSchema): ValidationIssue[] {
   }
   if (!labelCounts.has('title')) issues.push({ severity: 'error', message: `no property has the 'title' semantic label` });
   if (!labelCounts.has('url')) issues.push({ severity: 'error', message: `no property has the 'url' semantic label` });
+  if (!labelCounts.has('iconUrl')) issues.push({ severity: 'warning', message: `no property has the 'iconUrl' semantic label — add an iconUrl property to improve search result appearance` });
   return issues;
 }
 
@@ -216,8 +257,7 @@ const MAX_ITEM_BYTES = 4 * 1024 * 1024;
 async function validateItemSample(jsonlPath: string, schema: GraphConnectorSchema, sampleSize: number): Promise<ValidationIssue[]> {
   const propByName = new Map(schema.properties.map((p) => [p.name, p] as const));
   const issues: ValidationIssue[] = [];
-  const buf = fs.readFileSync(jsonlPath, 'utf-8');
-  const lines = buf.split(/\r?\n/).filter((l) => l.trim().length > 0).slice(0, sampleSize);
+  const lines = readJsonlSample(jsonlPath, sampleSize);
   let lineNo = 0;
   for (const line of lines) {
     lineNo++;
@@ -250,6 +290,30 @@ async function validateItemSample(jsonlPath: string, schema: GraphConnectorSchem
   return dedupeIssues(issues);
 }
 
+function readJsonlSample(jsonlPath: string, sampleSize: number): string[] {
+  const fd = fs.openSync(jsonlPath, 'r');
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  const lines: string[] = [];
+  let carry = '';
+  try {
+    while (lines.length < sampleSize) {
+      const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, null);
+      if (bytesRead === 0) break;
+      const text = carry + buffer.subarray(0, bytesRead).toString('utf-8');
+      const parts = text.split(/\r?\n/);
+      carry = parts.pop() || '';
+      for (const part of parts) {
+        if (part.trim()) lines.push(part);
+        if (lines.length >= sampleSize) break;
+      }
+    }
+    if (lines.length < sampleSize && carry.trim()) lines.push(carry);
+  } finally {
+    fs.closeSync(fd);
+  }
+  return lines;
+}
+
 function matchesType(v: unknown, t: GraphProperty['type']): boolean {
   if (t === 'String') return typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean';
   if (t === 'Int64') return typeof v === 'number' && Number.isFinite(v) && Math.floor(v) === v;
@@ -274,6 +338,19 @@ function dedupeIssues(issues: ValidationIssue[]): ValidationIssue[] {
 
 function schemaToTypeScript(schema: GraphConnectorSchema): string {
   return `// Generated by CopilotConnectorWorkflow step 3. Do not edit by hand.\n` +
+    `// Schema includes property aliases for data mapping and KQL query assistance.\n` +
     `export const connectorSchema = ${JSON.stringify(schema, null, 2)} as const;\n` +
     `export type ConnectorSchema = typeof connectorSchema;\n`;
 }
+
+// ---------------------------------------------------------------------------
+// Test-only exports — allow unit tests to exercise internal functions
+// without making them part of the public module API.
+// ---------------------------------------------------------------------------
+export const _test = {
+  hardenSchema,
+  validateSchema,
+  collectAliases,
+  softEnsureIconUrl,
+  schemaToTypeScript,
+};

@@ -67,6 +67,17 @@ export interface JobConfig {
   runM365Eval?: boolean;
   /** Step 6 configuration (only used when runM365Eval is true). */
   m365Eval?: M365EvalConfig;
+  /** Declarative agent display name. Defaults to `${connectorName} Assistant`. */
+  agentName?: string;
+  /** Declarative agent system instructions. Defaults to auto-generated from description. */
+  agentInstructions?: string;
+  /**
+   * Base URL prefix for source items (e.g. https://wiki.example.com).
+   * When set, the data-enhancer uses this prefix for generated item URLs and
+   * the connector's connection model includes an active urlToItemResolver,
+   * enabling URL unfurling in Teams/Copilot.
+   */
+  urlPrefix?: string;
 }
 
 export interface StepRecord {

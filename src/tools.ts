@@ -1,6 +1,6 @@
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
-import { spawnSync } from 'child_process';
 
 /** Resolve sibling project paths relative to the workflow repo. */
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -10,36 +10,51 @@ export interface ToolPaths {
   evalGen: string;          // path to eval-gen dist/index.js
   /** PowerShell script that converts EvalGen output to @microsoft/m365-copilot-eval JSON. */
   evalGenToM365Convert: string;
-  dataEnhancer: string;     // path to enhance_for_copilot.py
-  python: string;           // resolved python invocation (e.g., 'py' or 'python')
+  /** Compiled TypeScript batch enhancer (dist/enhancer/enhance_for_copilot.js). Used by step 2. */
+  dataEnhancer: string;
+  /** TypeScript batch enhancer SOURCE (src/enhancer/enhance_for_copilot.ts). Vendored into generated connectors by step 4. */
+  tsDataEnhancer: string;
   copilotConnectorSkill: string; // skill bundle root
   templatesRoot: string;
+}
+
+/**
+ * Resolves the TypeScript batch enhancer SOURCE file.
+ * Prefers the copy bundled within the workflow repo (src/enhancer/) so the workflow
+ * is self-contained; falls back to the external CopilotConnectorSkill repo / skill bundle.
+ */
+function resolveTsEnhancer(): string {
+  const candidates = [
+    path.join(REPO_ROOT, 'src', 'enhancer', 'enhance_for_copilot.ts'),  // bundled within workflow
+    path.join(SRC_ROOT, 'CopilotConnectorSkill', 'copilot-connector', 'sample_codes', 'data-enhancer', 'typescript', 'src', 'enhance_for_copilot.ts'),
+    path.join(os.homedir(), '.copilot', 'skills', 'copilot-connector', 'sample_codes', 'data-enhancer', 'typescript', 'src', 'enhance_for_copilot.ts'),
+  ];
+  return candidates.find(fs.existsSync) ?? candidates[0];
+}
+
+/**
+ * Priority-ordered candidates for the CopilotConnectorSkill bundle root.
+ */
+function resolveSkillRoot(): string {
+  const candidates = [
+    path.join(SRC_ROOT, 'CopilotConnectorSkill', 'copilot-connector'),
+    path.join(os.homedir(), '.copilot', 'skills', 'copilot-connector'),
+  ];
+  return candidates.find((p) => fs.existsSync(path.join(p, 'SKILL.md'))) ?? candidates[0];
 }
 
 export function resolveTools(): ToolPaths {
   const evalGen = path.join(SRC_ROOT, 'EvaluationCLI', 'eval-gen', 'dist', 'index.js');
   const evalGenToM365Convert = path.join(SRC_ROOT, 'EvaluationCLI', 'scripts', 'convert-evalgen-to-m365-copilot-eval.ps1');
-  const dataEnhancer = path.join(SRC_ROOT, 'data-enhancer', 'enhance_for_copilot.py');
-  const copilotConnectorSkill = path.join(SRC_ROOT, 'CopilotConnectorSkill', 'copilot-connector');
   const templatesRoot = path.join(REPO_ROOT, 'templates');
   return {
     evalGen,
     evalGenToM365Convert,
-    dataEnhancer,
-    python: detectPython(),
-    copilotConnectorSkill,
+    dataEnhancer: path.join(REPO_ROOT, 'dist', 'enhancer', 'enhance_for_copilot.js'),
+    tsDataEnhancer: resolveTsEnhancer(),
+    copilotConnectorSkill: resolveSkillRoot(),
     templatesRoot,
   };
-}
-
-export function detectPython(): string {
-  for (const candidate of [['py', '-3'], ['python'], ['python3']]) {
-    try {
-      const r = spawnSync(candidate[0], [...candidate.slice(1), '--version'], { shell: false });
-      if (r.status === 0) return candidate.join(' ');
-    } catch { /* ignore */ }
-  }
-  return 'python';
 }
 
 /** @microsoft/m365-copilot-eval requires Node.js >= 22.21.1. */
@@ -72,18 +87,12 @@ export function probeTools(t: ToolPaths = resolveTools()): ToolStatus[] {
     'Build it: cd ..\\EvaluationCLI\\eval-gen && npm install && npm run build'));
   out.push(probeFile('eval-gen→m365-eval convert', t.evalGenToM365Convert,
     'Expected in ..\\EvaluationCLI\\scripts'));
-  out.push(probeFile('data-enhancer', t.dataEnhancer, 'Repo expected at ..\\data-enhancer'));
+  out.push(probeFile('data-enhancer (compiled)', t.dataEnhancer,
+    'Build the workflow first: npm run build (in CopilotConnectorWorkflow)'));
+  out.push(probeFile('data-enhancer (typescript src)', t.tsDataEnhancer,
+    'Expected at src/enhancer/enhance_for_copilot.ts (bundled) or CopilotConnectorSkill skill'));
   out.push(probeFile('copilot-connector skill', path.join(t.copilotConnectorSkill, 'SKILL.md'),
-    'Skill expected at ..\\CopilotConnectorSkill\\copilot-connector'));
-  // Python
-  const pyParts = t.python.split(' ');
-  const pyTest = spawnSync(pyParts[0], [...pyParts.slice(1), '--version'], { shell: false });
-  out.push({
-    name: 'python',
-    path: t.python,
-    ok: pyTest.status === 0,
-    note: pyTest.status === 0 ? (pyTest.stdout?.toString() || pyTest.stderr?.toString() || '').trim() : 'Python not detected',
-  });
+    'Skill expected at CopilotConnectorSkill\\copilot-connector or ~/.copilot/skills/copilot-connector'));
   // Node version (warning only; required only for Step 6)
   const nodeCheck = checkNodeMinimum(M365_EVAL_MIN_NODE);
   out.push({

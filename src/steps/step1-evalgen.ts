@@ -6,6 +6,7 @@ import { fileHash, dirHash, objectHash } from '../jobs';
 import { isCached, stepInputsHash } from '../orchestrator';
 import { newStepRecord, startStep, finishStep, writeStepStatus } from './step-utils';
 import type { RunStepOptions } from '../orchestrator';
+import { prepareDatasetForWorkflow } from '../dataset-normalization';
 
 /** Step 1: run eval-gen against the dataset and produce eval.csv + .evalgen.json. */
 export async function runStep1Evalgen(opts: RunStepOptions): Promise<StepRecord> {
@@ -23,9 +24,14 @@ export async function runStep1Evalgen(opts: RunStepOptions): Promise<StepRecord>
     writeStepStatus(stepDir, rec); return rec;
   }
 
+  const preparedDataset = prepareDatasetForWorkflow(job.config.dataset, job.workspace, job.config.extensions);
+  rec.diagnostics?.push(...preparedDataset.diagnostics);
+
   const inputs = {
     dataset: job.config.dataset,
     datasetHash: dirHash(job.config.dataset),
+    preparedDataset: preparedDataset.dataset,
+    preparedExtensions: preparedDataset.extensions || [],
     description: job.config.description,
     count: job.config.count,
     extensions: job.config.extensions || [],
@@ -46,13 +52,13 @@ export async function runStep1Evalgen(opts: RunStepOptions): Promise<StepRecord>
   startStep(rec);
   const args = [
     tools.evalGen,
-    '--file', job.config.dataset,
+    '--file', preparedDataset.dataset,
     '--description', job.config.description,
     '--count', String(job.config.count),
     '--output', outputCsv,
   ];
-  if (job.config.extensions && job.config.extensions.length > 0) {
-    args.push('--extensions', job.config.extensions.join(','));
+  if (preparedDataset.extensions && preparedDataset.extensions.length > 0) {
+    args.push('--extensions', preparedDataset.extensions.join(','));
   }
   const result = await runProcess({
     cmd: process.execPath,  // node

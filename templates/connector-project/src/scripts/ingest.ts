@@ -2,7 +2,7 @@ import { buildGraphClient, withRetry } from '../services/graphService';
 import { connection } from '../models/connection';
 import { defaultDataSource } from '../custom/dataSource';
 
-const CONCURRENCY = 4;
+const CONCURRENCY = Number(process.env.INGEST_CONCURRENCY || '16');
 
 async function ingestAll(): Promise<void> {
   const client = buildGraphClient();
@@ -10,17 +10,20 @@ async function ingestAll(): Promise<void> {
   let count = 0;
   let failed = 0;
   const inflight = new Set<Promise<void>>();
+
   for await (const item of source.fetchItems()) {
     const work: Promise<void> = (async () => {
       try {
-        await withRetry(() => client
-          .api(`/external/connections/${connection.connectionId}/items/${encodeURIComponent(item.id)}`)
-          .put({
-            '@odata.type': '#microsoft.graph.externalConnectors.externalItem',
-            acl: item.acl,
-            properties: item.properties,
-            content: item.content,
-          }));
+        await withRetry(() =>
+          client
+            .api(`/external/connections/${connection.connectionId}/items/${encodeURIComponent(item.id)}`)
+            .put({
+              '@odata.type': '#microsoft.graph.externalConnectors.externalItem',
+              acl: item.acl,
+              properties: item.properties,
+              content: item.content,
+            })
+        );
         count++;
         if (count % 50 === 0) console.log(`Ingested ${count} items...`);
       } catch (e: any) {
@@ -33,7 +36,7 @@ async function ingestAll(): Promise<void> {
     if (inflight.size >= CONCURRENCY) await Promise.race(inflight);
   }
   await Promise.all(inflight);
-  console.log(`Ingestion complete: ${count} ok, ${failed} failed.`);
+  console.log(`Ingestion complete: ${count} ok, ${failed} ingest-failed.`);
   if (failed > 0) process.exit(1);
 }
 

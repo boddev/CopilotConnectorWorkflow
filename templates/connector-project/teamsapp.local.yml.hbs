@@ -1,0 +1,13 @@
+version: 1.0.0
+
+provision:
+  - uses: script
+    with:
+      shell: cmd
+      run: node dist/src/scripts/provision.js
+
+deploy:
+  - uses: script
+    with:
+      shell: cmd
+      run: npm run build

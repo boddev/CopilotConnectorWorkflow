@@ -1,7 +1,9 @@
 node_modules/
 dist/
-workspace/jobs/
-workspace/test-dataset/
+data/
+output/
+workspace/
+output.zip
 *.log
 .env
 .env.local

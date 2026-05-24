@@ -2,6 +2,23 @@ import { buildGraphClient, withRetry } from '../services/graphService';
 import { connection } from '../models/connection';
 import { connectorSchema } from '../references/schema';
 
+type GraphSchemaPayload = {
+  baseType: string;
+  properties: Array<Record<string, unknown>>;
+};
+
+// Import urlToItemResolver if it has been uncommented in connection.ts.
+// This enables link unfurling in Teams/Copilot when users share source URLs.
+// To activate, uncomment and configure `urlToItemResolver` in src/models/connection.ts.
+let urlToItemResolvers: object[] | undefined;
+try {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const mod = require('../models/connection') as { urlToItemResolver?: object };
+  if (mod.urlToItemResolver) urlToItemResolvers = [mod.urlToItemResolver];
+} catch {
+  // No urlToItemResolver defined — skip activitySettings
+}
+
 async function ensureConnection(): Promise<void> {
   const client = buildGraphClient();
   try {
@@ -10,11 +27,15 @@ async function ensureConnection(): Promise<void> {
   } catch (e: any) {
     if (e.statusCode === 404) {
       console.log(`Creating connection '${connection.connectionId}'...`);
-      await withRetry(() => client.api('/external/connections').post({
+      const payload: Record<string, unknown> = {
         id: connection.connectionId,
         name: connection.connectionName,
         description: connection.connectionDescription,
-      }));
+      };
+      if (urlToItemResolvers) {
+        payload.activitySettings = { urlToItemResolvers };
+      }
+      await withRetry(() => client.api('/external/connections').post(payload));
     } else {
       throw e;
     }
@@ -23,11 +44,12 @@ async function ensureConnection(): Promise<void> {
 
 async function registerSchema(): Promise<void> {
   const client = buildGraphClient();
+  const graphSchema = toGraphSchemaPayload(connectorSchema as unknown as GraphSchemaPayload);
   console.log(`Registering schema for '${connection.connectionId}' (this can take up to 10 minutes)...`);
   await withRetry(() => client
     .api(`/external/connections/${connection.connectionId}/schema`)
     .header('Prefer', 'respond-async')
-    .patch(connectorSchema));
+    .patch(graphSchema));
   console.log('Schema registration submitted. Polling for completion...');
 
   const deadline = Date.now() + 15 * 60 * 1000;
@@ -45,6 +67,13 @@ async function registerSchema(): Promise<void> {
     process.stdout.write('.');
   }
   throw new Error('Schema registration timed out after 15 minutes.');
+}
+
+function toGraphSchemaPayload(schema: GraphSchemaPayload): GraphSchemaPayload {
+  return {
+    baseType: schema.baseType,
+    properties: schema.properties.map(({ aliases, ...property }) => property),
+  };
 }
 
 async function main(): Promise<void> {

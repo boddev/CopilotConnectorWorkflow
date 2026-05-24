@@ -1,12 +1,13 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { StepRecord } from '../types';
-import { runProcess, splitInvocation } from '../run';
+import { runProcess } from '../run';
 import { fileHash, dirHash } from '../jobs';
 import { isCached, stepInputsHash, RunStepOptions } from '../orchestrator';
 import { newStepRecord, startStep, finishStep, writeStepStatus } from './step-utils';
+import { prepareDatasetForWorkflow } from '../dataset-normalization';
 
-/** Step 2: run the data-enhancer python script against dataset + eval sidecar. */
+/** Step 2: run the bundled TypeScript data-enhancer against dataset + eval sidecar. */
 export async function runStep2Enhance(opts: RunStepOptions): Promise<StepRecord> {
   const { job, tools, emitter, force } = opts;
   const rec = newStepRecord('enhance');
@@ -15,7 +16,8 @@ export async function runStep2Enhance(opts: RunStepOptions): Promise<StepRecord>
   const logFile = path.join(stepDir, 'step.log');
 
   if (!fs.existsSync(tools.dataEnhancer)) {
-    finishStep(rec, 'failed', `data-enhancer not found at ${tools.dataEnhancer}`);
+    finishStep(rec, 'failed',
+      `data-enhancer not found at ${tools.dataEnhancer} — build the workflow first: npm run build`);
     writeStepStatus(stepDir, rec); return rec;
   }
 
@@ -25,11 +27,18 @@ export async function runStep2Enhance(opts: RunStepOptions): Promise<StepRecord>
     writeStepStatus(stepDir, rec); return rec;
   }
 
+  const preparedDataset = prepareDatasetForWorkflow(job.config.dataset, job.workspace, job.config.extensions);
+  rec.diagnostics?.push(...preparedDataset.diagnostics);
+
   const inputs = {
     dataset: job.config.dataset,
     datasetHash: dirHash(job.config.dataset),
+    preparedDataset: preparedDataset.dataset,
+    preparedExtensions: preparedDataset.extensions || [],
     evalSidecarHash: fileHash(evalSidecar),
     aclMode: job.config.aclMode,
+    extensions: job.config.extensions || [],
+    urlPrefix: job.config.urlPrefix || '',
     enhancerHash: fileHash(tools.dataEnhancer),
   };
   const inputsHash = stepInputsHash([inputs]);
@@ -44,17 +53,21 @@ export async function runStep2Enhance(opts: RunStepOptions): Promise<StepRecord>
   }
 
   startStep(rec);
-  const [pyCmd, pyPrefix] = splitInvocation(tools.python);
   const args = [
-    ...pyPrefix,
     tools.dataEnhancer,
-    '--dataset', job.config.dataset,
+    '--dataset', preparedDataset.dataset,
     '--eval', evalSidecar,
     '--output', stepDir,
     '--acl-mode', job.config.aclMode,
   ];
+  if (preparedDataset.extensions && preparedDataset.extensions.length > 0) {
+    args.push('--extensions', preparedDataset.extensions.join(','));
+  }
+  if (job.config.urlPrefix) {
+    args.push('--url-prefix', job.config.urlPrefix);
+  }
   const result = await runProcess({
-    cmd: pyCmd,
+    cmd: process.execPath,
     args,
     cwd: path.dirname(tools.dataEnhancer),
     logFile,

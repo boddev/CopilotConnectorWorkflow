@@ -1,9 +1,11 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-/** Tiny mustache-like substitution: {{key}} -> values[key]. No conditionals. */
+/** Tiny mustache-like substitution: {{key}} -> values[key]. No conditionals.
+ *  Unknown keys are left as {{key}} (preserves Agents Toolkit ${{ENV_VAR}} syntax). */
 export function renderString(template: string, values: Record<string, string>): string {
-  return template.replace(/\{\{\s*([\w.-]+)\s*\}\}/g, (_, k) => {
+  return template.replace(/\{\{\s*([\w.-]+)\s*\}\}/g, (match, k) => {
+    if (!(k in values)) return match;
     const v = values[k];
     return v == null ? '' : String(v);
   });

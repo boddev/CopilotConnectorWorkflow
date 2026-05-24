@@ -1,0 +1,84 @@
+// src/functions/crawl.ts
+// Azure Functions crawl trigger for the {{connectorName}} connector.
+//
+// FAIL CLOSED: items that fail enhancement are never ingested as raw data.
+// Exceeding MAX_ENHANCEMENT_FAILURES aborts the entire crawl.
+
+import { app, InvocationContext, Timer } from '@azure/functions';
+import { buildGraphClient, withRetry } from '../services/graphService';
+import { connection } from '../models/connection';
+import { defaultDataSource } from '../custom/dataSource';
+import { enhance, EnhancementError, RawItem } from '../custom/enhancer';
+
+const MAX_ENHANCEMENT_FAILURES = 10;
+
+async function runCrawl(ctx: InvocationContext): Promise<{ ingested: number; skipped: number }> {
+  const client = buildGraphClient();
+  const source = defaultDataSource();
+  const aclMode = (process.env.ACL_MODE as 'everyone' | 'everyoneExceptGuests' | 'none') || '{{aclMode}}';
+  let ingested = 0;
+  let enhancementFailures = 0;
+
+  for await (const rawItem of source.fetchRawItems()) {
+    // FAIL CLOSED: always enhance before ingesting; never pass raw data to Graph
+    let item;
+    try {
+      item = enhance(rawItem as RawItem, aclMode);
+    } catch (e) {
+      if (e instanceof EnhancementError) {
+        enhancementFailures++;
+        ctx.error(`[FAIL-CLOSED] Enhancement failed for item '${(rawItem as RawItem).id ?? '?'}': ${(e as Error).message}. Raw data NOT ingested.`);
+        if (enhancementFailures >= MAX_ENHANCEMENT_FAILURES) {
+          throw new Error(
+            `Crawl aborted: ${enhancementFailures} enhancement failures exceeded threshold of ${MAX_ENHANCEMENT_FAILURES}. ` +
+            `Fix the data source or enhancer before retrying.`
+          );
+        }
+        continue;
+      }
+      throw e; // Non-enhancement errors propagate immediately
+    }
+
+    try {
+      await withRetry(() =>
+        client
+          .api(`/external/connections/${connection.connectionId}/items/${encodeURIComponent(item.id)}`)
+          .put({
+            '@odata.type': '#microsoft.graph.externalConnectors.externalItem',
+            acl: item.acl,
+            properties: item.properties,
+            content: item.content,
+          })
+      );
+      ingested++;
+    } catch (e: any) {
+      ctx.error(`Ingest failed for item '${item.id}': ${e.message || e}`);
+    }
+  }
+
+  if (enhancementFailures > 0) {
+    ctx.warn(`Crawl completed with ${enhancementFailures} enhancement failure(s). Review enhancer logs.`);
+  }
+  return { ingested, skipped: enhancementFailures };
+}
+
+/** Timer-triggered full crawl. Default: daily at 02:00 UTC. */
+app.timer('crawlTimer', {
+  schedule: '0 0 2 * * *',
+  handler: async (_t: Timer, ctx: InvocationContext) => {
+    ctx.log(`Crawl starting for connection '${connection.connectionId}'.`);
+    const result = await runCrawl(ctx);
+    ctx.log(`Crawl complete. Ingested: ${result.ingested}, Enhancement failures: ${result.skipped}.`);
+  },
+});
+
+/** HTTP-triggered crawl (manual invocation for testing). */
+app.http('crawlHttp', {
+  methods: ['POST'],
+  authLevel: 'function',
+  handler: async (_req, ctx) => {
+    ctx.log('Manual crawl invoked.');
+    const result = await runCrawl(ctx);
+    return { status: 200, jsonBody: result };
+  },
+});

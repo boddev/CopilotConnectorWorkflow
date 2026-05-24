@@ -7,6 +7,8 @@ import { createJob, loadJob, listJobs } from './jobs';
 import { runPipeline } from './orchestrator';
 import { resolveTools, probeTools } from './tools';
 import { JobConfig, RunMode, DeployTarget, StepName, ALL_STEPS, M365Evaluator } from './types';
+import { createCompareBatchRun, createCompareDatasetRun, formatCompareState } from './compare';
+import { executeCompareRun } from './compare-executor';
 
 interface ParsedArgs {
   cmd: string;
@@ -38,6 +40,10 @@ Commands:
   status      Show job status
   list        List all jobs
   tools       Show detected tool paths and health
+  compare-dataset
+              Validate and plan one enhanced-vs-RAW comparison run
+  compare-batch
+              Validate and plan a batch enhanced-vs-RAW comparison run
   help        Show this message
 
 Options for 'run':
@@ -64,6 +70,11 @@ Options for 'run':
   --m365-package-version <ver>  npx package version pin (default 'latest')
   --m365-log-level <lvl>        debug|info|warning|error (default 'info')
   --m365-accept-eula            Run 'runevals accept-eula' before evaluation
+  --agent-name <name>           Declarative agent display name (default: "<connectorName> Assistant")
+  --agent-instructions <text>   Declarative agent system instructions
+  --agent-instructions-file <p> Read agent instructions from a file
+  --url-prefix <url>            Base URL for source items (e.g. https://wiki.example.com); enables
+                                URL unfurling in Teams/Copilot via urlToItemResolver
   --force                       Force-re-run all steps
   --force-step <name>           Force one step (repeatable: e.g. --force-step schema)
   --start-at <step>             Start at this step (evalgen|enhance|schema|connector|deploy|m365eval)
@@ -72,6 +83,16 @@ Options for 'run':
 Options for 'resume':
   --job <id>                    Job ID to resume (required)
   (plus --force, --force-step, --start-at, --stop-after as above)
+
+Options for 'compare-dataset':
+   --config <path>                Dataset comparison JSON config (required)
+   --dry-run                      Validate config and write compare-state.json without external calls
+   Without --dry-run, builds enhanced + RAW connector projects. If config mode is
+   "provision", also provisions and ingests with the configured Graph app credentials.
+
+Options for 'compare-batch':
+   --manifest <path>              Batch manifest JSON with datasets[] (required)
+   --dry-run                      Validate manifest and write compare-state.json without external calls
 `;
 }
 
@@ -101,6 +122,34 @@ async function main(): Promise<void> {
     const j = loadJob(id);
     if (!j) { console.error(`job not found: ${id}`); process.exit(2); }
     console.log(JSON.stringify(j, null, 2));
+    process.exit(0);
+  }
+  if (cmd === 'compare-dataset') {
+    const config = flags.config;
+    if (!config) { console.error('--config <path> required'); process.exit(2); }
+    const state = createCompareDatasetRun(config, !!booleans['dry-run']);
+    console.log(formatCompareState(state));
+    if (!booleans['dry-run']) {
+      const emitter = new EventEmitter();
+      emitter.on('log', (e: { label?: string; text: string }) => process.stdout.write(e.text));
+      const result = await executeCompareRun(state, emitter);
+      console.log(`\nCompare execution ${result.state.status}. Report: ${result.reportPath}`);
+      process.exit(result.state.status === 'done' ? 0 : 1);
+    }
+    process.exit(0);
+  }
+  if (cmd === 'compare-batch') {
+    const manifest = flags.manifest;
+    if (!manifest) { console.error('--manifest <path> required'); process.exit(2); }
+    const state = createCompareBatchRun(manifest, !!booleans['dry-run']);
+    console.log(formatCompareState(state));
+    if (!booleans['dry-run']) {
+      const emitter = new EventEmitter();
+      emitter.on('log', (e: { label?: string; text: string }) => process.stdout.write(e.text));
+      const result = await executeCompareRun(state, emitter);
+      console.log(`\nCompare execution ${result.state.status}. Report: ${result.reportPath}`);
+      process.exit(result.state.status === 'done' ? 0 : 1);
+    }
     process.exit(0);
   }
   if (cmd === 'run' || cmd === 'resume') {
@@ -185,6 +234,12 @@ function buildConfigFromFlags(flags: Record<string, string>, booleans: Record<st
       acceptEula: !!booleans['m365-accept-eula'],
     };
   }
+  if (flags['agent-name']) cfg.agentName = flags['agent-name'];
+  if (flags['agent-instructions']) cfg.agentInstructions = flags['agent-instructions'];
+  if (flags['agent-instructions-file']) {
+    cfg.agentInstructions = fs.readFileSync(path.resolve(flags['agent-instructions-file']), 'utf-8');
+  }
+  if (flags['url-prefix']) cfg.urlPrefix = flags['url-prefix'];
   return cfg;
 }
 
