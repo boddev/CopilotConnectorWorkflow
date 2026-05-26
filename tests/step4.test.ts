@@ -40,6 +40,7 @@ describe('buildDefaultInstructions', () => {
     const instructions = buildDefaultInstructions(cfg as JobConfig);
     expect(instructions).toContain('My Docs');
     expect(instructions).toContain('Documentation about widgets');
+    expect(instructions).toContain('Preserve exact source values');
   });
 
   it('prefers connectorDescription over description when available', () => {

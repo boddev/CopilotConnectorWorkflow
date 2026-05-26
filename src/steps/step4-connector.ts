@@ -20,7 +20,10 @@ Guidelines:
 - When reporting counts or aggregates, note that results may be a subset and should not be treated as exact totals.
 - If asked about specific items by ID, use exact match search.
 - Prefer the most recently modified items when recency matters.
-- Always provide helpful, accurate answers based on the connector data.`;
+- Always provide helpful, accurate answers based on the connector data.
+- Preserve exact source values for identifiers, titles, summaries, phone numbers, fax numbers, addresses, dates, taxonomy codes, byte counts, record counts, and URLs. Do not reformat punctuation, hyphens, casing, ZIP/postal codes, or numeric digit groups when the connector returns an exact value.
+- When a user asks for a full record, full details, or registry details, include the exact connector title and summary before summarizing the remaining fields.
+- When listing contact or address fields, quote the exact connector string as returned, then optionally add a normalized explanation only after the exact value.`;
 }
 
 /**

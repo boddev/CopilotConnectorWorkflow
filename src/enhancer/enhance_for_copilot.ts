@@ -369,6 +369,7 @@ function stringifyJsonScalar(value: unknown): string {
 function extractJsonMetadata(value: Record<string, unknown>): Record<string, string> {
   const metadata: Record<string, string> = {};
   Object.assign(metadata, flattenedJsonMap(value));
+  metadata.domain = inferDomain(metadata);
   for (const [key, rawValue] of Object.entries(value)) {
     const normalizedKey = normalizeMetadataKey(key);
     let textValue = "";
@@ -426,8 +427,19 @@ function jsonValueToText(value: unknown, heading = "", level = 1): string {
 function jsonValueToExactFacts(value: unknown, prefix = ""): string[] {
   const facts: string[] = [];
   if (Array.isArray(value)) {
+    const scalars = value
+      .map(item => stringifyJsonScalar(item))
+      .filter(text => text && text.length <= 1000);
+    if (prefix && scalars.length > 0) {
+      const joined = scalars.join("; ");
+      facts.push(`${prefix}: ${joined}`);
+      const leaf = prefix.split(".").pop() || prefix;
+      if (leaf !== prefix) facts.push(`${leaf}: ${joined}`);
+    }
     value.forEach((item, index) => {
-      facts.push(...jsonValueToExactFacts(item, prefix ? `${prefix}.${index}` : String(index)));
+      if (item && typeof item === "object") {
+        facts.push(...jsonValueToExactFacts(item, prefix ? `${prefix}.${index}` : String(index)));
+      }
     });
     return facts;
   }
@@ -456,6 +468,7 @@ const STRUCTURED_PROPERTY_KEYS = [
   "summary",
   "recordType",
   "lastModified",
+  "domain",
   "cmsDatasetId",
   "cmsDatasetTitle",
   "measureName",
@@ -470,12 +483,75 @@ const STRUCTURED_PROPERTY_KEYS = [
   "recordCount",
   "bytes",
   "status",
+  "npi",
+  "providerType",
+  "organizationName",
+  "taxonomyCodes",
+  "taxonomyDescriptions",
+  "primaryTaxonomyCode",
+  "primaryTaxonomyDescription",
+  "practiceAddress",
+  "mailingAddress",
+  "phoneNumber",
+  "faxNumber",
+  "enumerationDate",
+  "nppesLastUpdatedDate",
+  "code",
+  "codeSystem",
+  "shortDescription",
+  "longDescription",
+  "chapter",
+  "category",
+  "parentCode",
+  "releaseYear",
+  "effectiveDate",
 ] as const;
+
+type InferredDomain = "cms" | "npi" | "icd10" | "generic";
+
+const INFERRED_DOMAINS: InferredDomain[] = ["cms", "npi", "icd10", "generic"];
+
+function isInferredDomain(value: unknown): value is InferredDomain {
+  return typeof value === "string" && (INFERRED_DOMAINS as string[]).includes(value);
+}
+
+const DOMAIN_FIELD_ORDER: Record<InferredDomain, string[]> = {
+  cms: [
+    "recordId", "title", "summary", "recordType", "lastModified",
+    "cmsDatasetId", "cmsDatasetTitle", "measureName", "providerName",
+    "facilityType", "reportingPeriod", "geography", "metricValue", "methodologyUrl",
+  ],
+  npi: [
+    "npi", "providerName", "organizationName", "providerType", "recordId", "title",
+    "taxonomyCodes", "taxonomyDescriptions", "primaryTaxonomyCode", "primaryTaxonomyDescription",
+    "practiceAddress", "mailingAddress", "phoneNumber", "faxNumber", "enumerationDate", "nppesLastUpdatedDate",
+  ],
+  icd10: [
+    "code", "codeSystem", "shortDescription", "longDescription", "chapter",
+    "category", "parentCode", "releaseYear", "effectiveDate", "recordId", "title", "summary",
+  ],
+  generic: [
+    "recordId", "title", "summary", "recordType", "lastModified",
+    "packageName", "displayName", "recordCount", "bytes", "status",
+  ],
+};
 
 function flattenedJsonMap(value: unknown, prefix = ""): Record<string, string> {
   const out: Record<string, string> = {};
   if (Array.isArray(value)) {
-    value.forEach((item, index) => Object.assign(out, flattenedJsonMap(item, prefix ? `${prefix}.${index}` : String(index))));
+    const scalars = value
+      .map(item => stringifyJsonScalar(item))
+      .filter(text => text && text.length <= 1000);
+    if (prefix && scalars.length > 0) {
+      out[prefix] = scalars.join("; ");
+      const leaf = prefix.split(".").pop() || prefix;
+      if (!out[leaf]) out[leaf] = out[prefix];
+    }
+    value.forEach((item, index) => {
+      if (item && typeof item === "object") {
+        Object.assign(out, flattenedJsonMap(item, prefix ? `${prefix}.${index}` : String(index)));
+      }
+    });
     return out;
   }
   if (value && typeof value === "object") {
@@ -495,16 +571,64 @@ function flattenedJsonMap(value: unknown, prefix = ""): Record<string, string> {
   return out;
 }
 
-function pickStructuredValue(flat: Record<string, string>, key: string): string {
+function pickStructuredValue(flat: Record<string, string>, key: string, allowSuffix: boolean = true): string {
   if (flat[key]) return flat[key];
   const normalizedKey = normalizeMetadataKey(key);
-  const match = Object.entries(flat).find(([candidate]) => normalizeMetadataKey(candidate) === normalizedKey || normalizeMetadataKey(candidate).endsWith(normalizedKey));
+  const match = Object.entries(flat).find(([candidate]) => {
+    const normalizedCandidate = normalizeMetadataKey(candidate);
+    return normalizedCandidate === normalizedKey || (allowSuffix && normalizedCandidate.endsWith(normalizedKey));
+  });
   return match?.[1] || "";
+}
+
+function inferDomain(flat: Record<string, string>): InferredDomain {
+  const keys = new Set(Object.keys(flat).map(normalizeMetadataKey));
+  const has = (...names: string[]) => names.some(name => keys.has(normalizeMetadataKey(name)));
+  const npi = pickStructuredValue(flat, "npi", false);
+  const code = pickStructuredValue(flat, "code", false);
+  const codeSystem = pickStructuredValue(flat, "codeSystem", false);
+  if (has("taxonomyCodes", "taxonomyDescriptions", "providerType", "practiceAddress") || /^\d{10}$/.test(npi)) return "npi";
+  if (has("codeSystem", "shortDescription", "longDescription", "chapter", "parentCode") || /icd-?10/i.test(codeSystem) || /^[A-TV-Z][0-9][0-9A-Z]/.test(code)) return "icd10";
+  if (has("cmsDatasetId", "cmsDatasetTitle", "measureName", "facilityType", "methodologyUrl", "reportingPeriod")) return "cms";
+  return "generic";
+}
+
+function canonicalSentence(domain: InferredDomain, flat: Record<string, string>): string {
+  if (domain === "npi") {
+    const npi = pickStructuredValue(flat, "npi", false) || pickStructuredValue(flat, "recordId", false);
+    if (!npi) return "";
+    const name = pickStructuredValue(flat, "providerName") || pickStructuredValue(flat, "organizationName") || pickStructuredValue(flat, "title");
+    const type = pickStructuredValue(flat, "providerType");
+    const taxonomy = pickStructuredValue(flat, "primaryTaxonomyDescription") || pickStructuredValue(flat, "taxonomyDescriptions");
+    const address = pickStructuredValue(flat, "practiceAddress");
+    return [`NPI ${npi}`, name, type, taxonomy ? `primary taxonomy ${taxonomy}` : "", address ? `practice address ${address}` : ""].filter(Boolean).join(" — ") + ".";
+  }
+  if (domain === "icd10") {
+    const code = pickStructuredValue(flat, "code", false) || pickStructuredValue(flat, "recordId", false);
+    if (!code) return "";
+    const desc = pickStructuredValue(flat, "longDescription") || pickStructuredValue(flat, "shortDescription") || pickStructuredValue(flat, "summary");
+    const system = pickStructuredValue(flat, "codeSystem") || "ICD-10";
+    const chapter = pickStructuredValue(flat, "chapter");
+    return [`${system} code ${code}`, desc, chapter ? `chapter ${chapter}` : ""].filter(Boolean).join(" — ") + ".";
+  }
+  if (domain === "cms") {
+    const title = pickStructuredValue(flat, "cmsDatasetTitle", false) || pickStructuredValue(flat, "title", false);
+    if (!title) return "";
+    const measure = pickStructuredValue(flat, "measureName");
+    const period = pickStructuredValue(flat, "reportingPeriod");
+    const geography = pickStructuredValue(flat, "geography");
+    return [`CMS dataset ${title}`, measure ? `measure ${measure}` : "", period ? `reporting period ${period}` : "", geography ? `geography ${geography}` : ""].filter(Boolean).join(" — ") + ".";
+  }
+  const title = pickStructuredValue(flat, "title") || pickStructuredValue(flat, "displayName") || pickStructuredValue(flat, "recordId");
+  return title ? `${title} record.` : "";
 }
 
 function buildStructuredJsonContent(value: unknown): string {
   const flat = flattenedJsonMap(value);
-  const canonical = STRUCTURED_PROPERTY_KEYS
+  const domain = inferDomain(flat);
+  const orderedKeys = [...new Set(["domain", ...DOMAIN_FIELD_ORDER[domain], ...STRUCTURED_PROPERTY_KEYS])];
+  flat.domain = domain;
+  const canonical = orderedKeys
     .map(key => [key, pickStructuredValue(flat, key)] as const)
     .filter(([, val]) => val);
   const exactFacts = Object.entries(flat)
@@ -515,6 +639,8 @@ function buildStructuredJsonContent(value: unknown): string {
   const summary = pickStructuredValue(flat, "summary");
   const title = pickStructuredValue(flat, "title") || pickStructuredValue(flat, "displayName") || pickStructuredValue(flat, "cmsDatasetTitle");
   const blocks: string[] = [];
+  const sentence = canonicalSentence(domain, flat);
+  if (sentence) blocks.push(sentence, "");
   if (canonical.length > 0) {
     blocks.push("Canonical facts:", ...canonical.map(([key, val]) => `- ${key}: ${val}`));
   }
@@ -1925,6 +2051,12 @@ function updateFileStats(stats: FileStats, row: Record<string, string>, config: 
   if (year) stats.yearValues.add(year);
 }
 
+function incrementDomainCount(domainCounts: Map<InferredDomain, number>, value: unknown): void {
+  if (isInferredDomain(value)) {
+    domainCounts.set(value, (domainCounts.get(value) || 0) + 1);
+  }
+}
+
 function buildDatasetOverviewContent(
   stats: FileStats,
   evalItems: EvalItem[],
@@ -2025,6 +2157,7 @@ function schemaSuggestion(
   evalFieldCounts: Map<string, number>,
   config: EnhancerConfig,
   hasNontabular: boolean = false,
+  observedDomains: Set<InferredDomain> = new Set(),
 ): Record<string, unknown> {
   const allFields = new Map<string, number>();
   for (const stats of fileStats) {
@@ -2046,6 +2179,18 @@ function schemaSuggestion(
     { name: "rowCount", type: "Int64", isQueryable: true, isRetrievable: true, aliases: ["records", "recordCount"] },
   ];
 
+  const activeDomains = new Set<InferredDomain>(
+    [...observedDomains].filter(domain => domain !== "generic")
+  );
+  if (observedDomains.has("generic")) {
+    activeDomains.add("generic");
+  }
+  for (const stats of fileStats) {
+    const headerMap = Object.fromEntries(stats.header.map(header => [header, "sample"]));
+    const inferred = inferDomain(headerMap);
+    if (inferred !== "generic") activeDomains.add(inferred);
+  }
+
   // Document/chunk properties when non-tabular files are present
   if (hasNontabular) {
     properties.push(
@@ -2057,11 +2202,15 @@ function schemaSuggestion(
       { name: "author", type: "String", isSearchable: false, isQueryable: true, isRetrievable: true, aliases: ["creator", "writer"] },
       { name: "datePublished", type: "String", isSearchable: false, isQueryable: true, isRetrievable: true, aliases: ["publishedDate", "documentDate", "created"] },
     );
-    const structuredProps: Array<Record<string, unknown>> = [
+    const commonStructuredProps: Array<Record<string, unknown>> = [
       { name: "recordId", type: "String", isSearchable: false, isQueryable: true, isRetrievable: true, isExactMatchRequired: true, aliases: ["id", "cmsDatasetId"] },
       { name: "summary", type: "String", isSearchable: true, isQueryable: false, isRetrievable: true, aliases: ["description", "abstract"] },
       { name: "recordType", type: "String", isSearchable: true, isQueryable: true, isRetrievable: true, aliases: ["type"] },
       { name: "lastModified", type: "String", isSearchable: false, isQueryable: true, isRetrievable: true, aliases: ["modified", "updated"] },
+      { name: "domain", type: "String", isSearchable: true, isQueryable: true, isRetrievable: true, isRefinable: true },
+    ];
+    const domainStructuredProps: Record<InferredDomain, Array<Record<string, unknown>>> = {
+      cms: [
       { name: "cmsDatasetId", type: "String", isSearchable: false, isQueryable: true, isRetrievable: true, isExactMatchRequired: true, aliases: ["datasetId"] },
       { name: "cmsDatasetTitle", type: "String", isSearchable: true, isQueryable: true, isRetrievable: true, aliases: ["datasetTitle"] },
       { name: "measureName", type: "String", isSearchable: true, isQueryable: true, isRetrievable: true, aliases: ["measure"] },
@@ -2071,10 +2220,46 @@ function schemaSuggestion(
       { name: "geography", type: "String", isSearchable: true, isQueryable: true, isRetrievable: true, aliases: ["location"] },
       { name: "metricValue", type: "Double", isQueryable: true, isRetrievable: true, aliases: ["value"] },
       { name: "methodologyUrl", type: "String", isSearchable: true, isQueryable: true, isRetrievable: true, aliases: ["methodology"] },
+      ],
+      generic: [
       { name: "packageName", type: "String", isSearchable: true, isQueryable: true, isRetrievable: true },
       { name: "displayName", type: "String", isSearchable: true, isQueryable: true, isRetrievable: true },
+      { name: "recordCount", type: "Int64", isQueryable: true, isRetrievable: true },
       { name: "bytes", type: "Int64", isQueryable: true, isRetrievable: true },
       { name: "status", type: "String", isSearchable: true, isQueryable: true, isRetrievable: true },
+      ],
+      npi: [
+      { name: "npi", type: "String", isSearchable: true, isQueryable: true, isRetrievable: true },
+      { name: "providerType", type: "String", isSearchable: true, isQueryable: true, isRetrievable: true },
+      { name: "providerName", type: "String", isSearchable: true, isQueryable: true, isRetrievable: true, aliases: ["provider"] },
+      { name: "organizationName", type: "String", isSearchable: true, isQueryable: true, isRetrievable: true },
+      { name: "taxonomyCodes", type: "String", isSearchable: true, isQueryable: true, isRetrievable: true },
+      { name: "taxonomyDescriptions", type: "String", isSearchable: true, isQueryable: true, isRetrievable: true },
+      { name: "primaryTaxonomyCode", type: "String", isSearchable: false, isQueryable: true, isRetrievable: true, isExactMatchRequired: true },
+      { name: "primaryTaxonomyDescription", type: "String", isSearchable: true, isQueryable: true, isRetrievable: true },
+      { name: "practiceAddress", type: "String", isSearchable: true, isQueryable: true, isRetrievable: true },
+      { name: "mailingAddress", type: "String", isSearchable: true, isQueryable: true, isRetrievable: true },
+      { name: "phoneNumber", type: "String", isSearchable: false, isQueryable: true, isRetrievable: true },
+      { name: "faxNumber", type: "String", isSearchable: false, isQueryable: true, isRetrievable: true },
+      { name: "enumerationDate", type: "String", isSearchable: false, isQueryable: true, isRetrievable: true },
+      { name: "nppesLastUpdatedDate", type: "String", isSearchable: false, isQueryable: true, isRetrievable: true },
+      ],
+      icd10: [
+      { name: "code", type: "String", isSearchable: false, isQueryable: true, isRetrievable: true, isExactMatchRequired: true },
+      { name: "codeSystem", type: "String", isSearchable: true, isQueryable: true, isRetrievable: true },
+      { name: "shortDescription", type: "String", isSearchable: true, isQueryable: false, isRetrievable: true },
+      { name: "longDescription", type: "String", isSearchable: true, isQueryable: false, isRetrievable: true },
+      { name: "chapter", type: "String", isSearchable: true, isQueryable: true, isRetrievable: true },
+      { name: "category", type: "String", isSearchable: true, isQueryable: true, isRetrievable: true },
+      { name: "parentCode", type: "String", isSearchable: false, isQueryable: true, isRetrievable: true, isExactMatchRequired: true },
+      { name: "releaseYear", type: "Int64", isQueryable: true, isRetrievable: true },
+      { name: "effectiveDate", type: "String", isSearchable: false, isQueryable: true, isRetrievable: true },
+      ],
+    };
+    const structuredProps = [
+      ...commonStructuredProps,
+      ...[...(activeDomains.size > 0 ? activeDomains : new Set<InferredDomain>(["generic"]))]
+        .flatMap(domain => domainStructuredProps[domain]),
     ];
     for (const prop of structuredProps) {
       if (!properties.some(existing => existing.name === prop.name)) properties.push(prop);
@@ -2102,9 +2287,11 @@ function schemaSuggestion(
   const combined = new Map<string, number>();
   for (const [k, v] of evalFieldCounts) combined.set(k, (combined.get(k) || 0) + v);
   for (const [k, v] of allFields) combined.set(k, (combined.get(k) || 0) + v);
+  const maxSchemaProperties = 120;
   const sorted = [...combined.entries()].sort((a, b) => b[1] - a[1]).slice(0, 80);
 
   for (const [fieldName] of sorted) {
+    if (properties.length >= maxSchemaProperties) break;
     if (usedPropertyNames.has(fieldName)) continue;
     const propertyName = graphSchemaPropertyName(fieldName, usedPropertyNames);
     const displayName = humanizeField(fieldName, config);
@@ -2147,7 +2334,7 @@ function schemaSuggestion(
   const notes = [
     "This schema uses Graph connector labels arrays; register it before ingesting items and poll schema status until completed.",
     "No property is both searchable and refinable; those attributes are mutually exclusive.",
-    "Refinable properties are intentionally limited to itemType, sourceFile, entityName, year, isoCode, and contentType because refinable cannot be added later via schema update.",
+    "Refinable properties are intentionally limited to itemType, sourceFile, entityName, year, isoCode, contentType, and domain because refinable cannot be added later via schema update.",
     "Populate url and iconUrl with valid absolute URLs in your connector pipeline before production ingestion.",
     "Use sourceFieldMappings to translate raw tabular column names to the Graph-safe schema property names during ingestion.",
     "Keep ACL assignment in the connector pipeline and use Entra object IDs or external groups according to source permissions.",
@@ -2317,6 +2504,7 @@ export function run(args: RunArgs): Record<string, unknown> {
   };
   const nontabularStats: Array<{ file: string; contentType: string; chunkCount: number; titles: string[] }> = [];
   const nontabularContentTypes: string[] = [];
+  const domainCounts = new Map<InferredDomain, number>();
 
   let itemCount = 0;
   let documentItemsWritten = 0;
@@ -2389,6 +2577,7 @@ export function run(args: RunArgs): Record<string, unknown> {
       const row = rows[rowIndex];
       const rowNumber = rowIndex + 1;
       updateFileStats(stats, row, config);
+      incrementDomainCount(domainCounts, inferDomain(row));
 
       const entity = findFirst(row, config.keyFieldCandidates.entity || []);
       const year = findFirst(row, config.keyFieldCandidates.year || []);
@@ -2556,6 +2745,7 @@ export function run(args: RunArgs): Record<string, unknown> {
       for (const { doc, chunk, matches } of processJsonlFileStreaming(ntFile, relativePath, urlPrefix, byRef, byEntityYear, config)) {
         if (emittedForFile >= limit) break;
         const item = buildDocumentItem(chunk, doc, args.acl_mode);
+        incrementDomainCount(domainCounts, (item.properties as Record<string, unknown>).domain);
         writeItem(item);
         const contentValue = (item.content as { value: string }).value;
         updateCoverage(
@@ -2605,6 +2795,7 @@ export function run(args: RunArgs): Record<string, unknown> {
 
     for (const { doc, chunk } of documents) {
       const item = buildDocumentItem(chunk, doc, args.acl_mode);
+      incrementDomainCount(domainCounts, (item.properties as Record<string, unknown>).domain);
       writeItem(item);
       updateCoverage(
         coverage,
@@ -2682,13 +2873,14 @@ export function run(args: RunArgs): Record<string, unknown> {
         skippedReason: stats.skippedReason,
       })),
       nontabularStats,
+      domainCounts: Object.fromEntries([...domainCounts.entries()].sort()),
     }, null, 2),
     "utf-8"
   );
 
   fs.writeFileSync(
     path.join(outputPath, "schema-suggestion.json"),
-    JSON.stringify(schemaSuggestion(fileStats, evalFieldCounts, config, documentItemsWritten > 0), null, 2),
+    JSON.stringify(schemaSuggestion(fileStats, evalFieldCounts, config, documentItemsWritten > 0, new Set(domainCounts.keys())), null, 2),
     "utf-8"
   );
 
