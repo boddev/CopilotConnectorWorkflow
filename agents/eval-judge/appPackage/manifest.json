@@ -1,0 +1,33 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/teams/v1.23/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.23",
+  "version": "1.0.0",
+  "id": "${{TEAMS_APP_ID}}",
+  "developer": {
+    "name": "Copilot Connector Workflow",
+    "websiteUrl": "https://example.com",
+    "privacyUrl": "https://example.com/privacy",
+    "termsOfUseUrl": "https://example.com/terms"
+  },
+  "name": {
+    "short": "Eval Judge",
+    "full": "Copilot Connector Workflow Eval Judge"
+  },
+  "description": {
+    "short": "Internal LLM-as-judge for the eval-score CLI.",
+    "full": "Internal Microsoft 365 Copilot declarative agent used by the Copilot Connector Workflow eval-score CLI. Scores candidate answers against expected answers using a supplied rubric and returns a deterministic integer 0-100 or strict JSON {\"score\": number, \"reason\": string}. No browsing, no connector knowledge, no tools."
+  },
+  "icons": {
+    "color": "icon-color.png",
+    "outline": "icon-outline.png"
+  },
+  "accentColor": "#FFFFFF",
+  "copilotAgents": {
+    "declarativeAgents": [
+      {
+        "id": "declarativeAgent",
+        "file": "declarativeAgent.json"
+      }
+    ]
+  }
+}
