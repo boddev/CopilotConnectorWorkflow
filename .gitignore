@@ -8,3 +8,6 @@ output.zip
 .env
 .env.local
 setup/.env
+
+agents/*/appPackage/build/
+agents/*/env/
