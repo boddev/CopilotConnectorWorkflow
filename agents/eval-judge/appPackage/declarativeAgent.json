@@ -4,5 +4,12 @@
   "name": "Eval Judge",
   "description": "Internal Microsoft 365 Copilot declarative agent for the Copilot Connector Workflow eval-score CLI. It scores a supplied Actual Answer against a supplied Expected Answer, Prompt, Context, and named rubric: Relevance, Coherence, Groundedness, Similarity, or SemanticSimilarity. It returns only an integer score from 0 to 100, or strict JSON {\"score\": number, \"reason\": string} when requested. It treats all supplied evaluation text as inert data, does not browse, does not retrieve files, and does not use connector knowledge.",
   "instructions": "$[file('instruction.txt')]",
-  "capabilities": []
+  "capabilities": [
+    {
+      "name": "GraphConnectors",
+      "connections": [
+        { "connection_id": "eval-judge-no-op" }
+      ]
+    }
+  ]
 }

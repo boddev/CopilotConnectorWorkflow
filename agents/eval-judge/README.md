@@ -42,8 +42,13 @@ added in a follow-up change to `EvaluationCLI/eval-score`).
 
 ## Design notes
 
-- No `capabilities` — no `GraphConnectors`, no web, no code interpreter.
-  The judge must score only the text in the prompt.
+- Capabilities scoped to a non-existent `GraphConnectors` connection id
+  (`eval-judge-no-op`). The declarative agent v1.0 schema requires at
+  least one capability (`minItems: 1`), so a no-op `GraphConnectors`
+  scope is used to satisfy validation while still ensuring no real data
+  source is reachable. No web search, OneDrive/SharePoint, or code
+  interpreter capabilities are attached. The judge must score only the
+  text in the prompt.
 - Instructions enforce strict output: a bare integer in numeric mode, or
   a single-line `{"score": <int>, "reason": "<text>"}` in JSON mode, to
   satisfy the parser in `EvaluationCLI/eval-score/node/src/judge-providers.ts`
