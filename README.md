@@ -197,6 +197,26 @@ This wires `--url-prefix` through to the data-enhancer (so generated item URLs u
 
 ### Provision-mode connector + optional m365-copilot-eval scoring
 
+Run the authentication preflight once before the long workflow so Graph app
+credentials and delegated WorkIQ/device-code auth fail fast:
+
+```cmd
+set CCW_SECRET=<client-secret>
+scripts\run-cli.cmd auth ^
+  --tenant-id <tenantGuid> ^
+  --client-id <appId> ^
+  --client-secret-env CCW_SECRET ^
+  --m365-accept-eula
+```
+
+The Graph check exchanges the client secret for a token, verifies the required
+Graph connector app roles are present, and probes `/external/connections`. The
+WorkIQ check starts `workiq mcp`, accepts the WorkIQ EULA, and sends one small
+auth prompt so EvalGen/EvalScore delegated auth is seeded before the workflow.
+If EvalScore direct A2A uses MSAL device code, add `--eval-score-a2a` after
+setting `EVALSCORE_A2A_AUTH_MODE=msal`, `EVALSCORE_A2A_CLIENT_ID`,
+`EVALSCORE_A2A_TENANT_ID`, and `EVALSCORE_A2A_SCOPES`.
+
 ```cmd
 scripts\run-cli.cmd run ^
   --dataset "..\EvaluationCLI\environment-datasets" ^
@@ -211,7 +231,8 @@ scripts\run-cli.cmd run ^
   --m365-agent-id <m365AgentId> ^
   --m365-system-prompt "..\EvaluationCLI\prompts\ngo-environment-system-prompt.md" ^
   --m365-evaluators Relevance,Coherence,Groundedness,Citations ^
-  --m365-accept-eula
+  --m365-accept-eula ^
+  --auth-preflight
 ```
 
 > Provision mode renders tenant/app settings into the generated connector and enables provision-only steps such as m365 eval. The generated connector's `npm run provision` and `npm run ingest` scripts are what actually create the Graph connection and upload items; the compare workflow invokes those scripts automatically in its own `provision` mode. This does *not* deploy infrastructure to Azure — use the emitted `deploy/` artifacts (`deploy.ps1`, Bicep, Dockerfile) for that.
@@ -352,6 +373,8 @@ Each run = a new job folder. State is per-job. To re-run on a different dataset,
 | Symptom | Cause / fix |
 |---|---|
 | `spawn EINVAL` on npm | Resolved — the orchestrator detects `.cmd`/`.bat` on Windows and switches to shell mode automatically. |
+| Auth fails late in EvalGen, EvalScore, or connector provisioning | Run `scripts\run-cli.cmd auth --tenant-id <tenantGuid> --client-id <appId> --client-secret-env <envName>` first, or add `--auth-preflight` to `run`/`resume`. Use `--skip-workiq` only when EvalGen is configured for a non-WorkIQ provider. |
+| Graph auth preflight reports missing app roles | Grant admin consent for `ExternalConnection.ReadWrite.OwnedBy` and `ExternalItem.ReadWrite.OwnedBy` on the app registration, then rerun `ccw auth`. |
 | `eval-gen` error: `required option '--description'` | Make sure you're on the latest workflow build — eval-gen 1.0+ moved the options to the root command, not a `generate` subcommand. |
 | Step 6 says `mode is build` | Add `--mode provision` and provide auth. Step 6 only runs after a real ingestion. |
 | Step 6 says `agentId is required` | Pass `--m365-agent-id <m365 agent guid>`. The connector ID is *not* the agent ID. |

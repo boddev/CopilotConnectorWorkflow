@@ -9,6 +9,7 @@ import { resolveTools, probeTools } from './tools';
 import { JobConfig, RunMode, DeployTarget, StepName, ALL_STEPS, M365Evaluator } from './types';
 import { createCompareBatchRun, createCompareDatasetRun, formatCompareState } from './compare';
 import { executeCompareRun } from './compare-executor';
+import { formatAuthPreflightResult, runAuthPreflight, shouldRunEvalScoreA2AFromEnv } from './auth-preflight';
 
 interface ParsedArgs {
   cmd: string;
@@ -40,6 +41,7 @@ Commands:
   status      Show job status
   list        List all jobs
   tools       Show detected tool paths and health
+  auth        Validate Graph app credentials and seed WorkIQ/EvalScore auth
   compare-dataset
               Validate and plan one enhanced-vs-RAW comparison run
   compare-batch
@@ -79,10 +81,22 @@ Options for 'run':
   --force-step <name>           Force one step (repeatable: e.g. --force-step schema)
   --start-at <step>             Start at this step (evalgen|enhance|schema|connector|deploy|m365eval)
   --stop-after <step>           Stop after this step
+  --auth-preflight              Validate auth before creating/running the job
+  --skip-workiq-auth            With --auth-preflight, skip WorkIQ MCP auth seeding
 
 Options for 'resume':
   --job <id>                    Job ID to resume (required)
   (plus --force, --force-step, --start-at, --stop-after as above)
+
+Options for 'auth':
+  --tenant-id <id>              Entra tenant ID for Graph and delegated auth
+  --client-id <id>              Graph connector app/client ID
+  --client-secret-env <name>    Env var holding the Graph connector client secret
+  --skip-graph                  Do not validate Graph client credentials
+  --skip-workiq                 Do not start WorkIQ MCP auth preflight
+  --eval-score-a2a              Seed EvalScore A2A MSAL device-code token cache
+  --m365-accept-eula            Accept @microsoft/m365-copilot-eval EULA
+  --m365-package-version <ver>  npx package version pin (default 'latest')
 
 Options for 'compare-dataset':
    --config <path>                Dataset comparison JSON config (required)
@@ -107,6 +121,22 @@ async function main(): Promise<void> {
       console.log(`${t.ok ? '✓' : '✗'} ${t.name.padEnd(28)} ${t.path}${t.note ? `\n     ${t.note}` : ''}`);
     }
     process.exit(status.every((t) => t.ok) ? 0 : 1);
+  }
+  if (cmd === 'auth') {
+    const emitter = new EventEmitter();
+    emitter.on('log', (e: { text: string }) => process.stderr.write(e.text));
+    const result = await runAuthPreflight({
+      tenantId: flags['tenant-id'],
+      clientId: flags['client-id'],
+      clientSecretEnvVar: flags['client-secret-env'],
+      runGraph: !booleans['skip-graph'],
+      runWorkIq: !booleans['skip-workiq'],
+      runEvalScoreA2A: !!booleans['eval-score-a2a'] || shouldRunEvalScoreA2AFromEnv(),
+      runM365EvalEula: !!booleans['m365-accept-eula'],
+      m365EvalPackageVersion: flags['m365-package-version'],
+    }, emitter);
+    console.log(formatAuthPreflightResult(result));
+    process.exit(result.passed ? 0 : 1);
   }
   if (cmd === 'list') {
     const jobs = listJobs();
@@ -156,6 +186,10 @@ async function main(): Promise<void> {
     let job;
     if (cmd === 'run') {
       const cfg = buildConfigFromFlags(flags, booleans);
+      if (booleans['auth-preflight']) {
+        const ok = await runAuthPreflightForConfig(cfg, flags, booleans);
+        if (!ok) process.exit(1);
+      }
       job = createJob(cfg);
       console.log(`Created job ${job.id} at ${job.workspace}`);
     } else {
@@ -164,6 +198,10 @@ async function main(): Promise<void> {
       const loaded = loadJob(id);
       if (!loaded) { console.error(`job not found: ${id}`); process.exit(2); }
       job = loaded;
+      if (booleans['auth-preflight']) {
+        const ok = await runAuthPreflightForConfig(job.config, flags, booleans);
+        if (!ok) process.exit(1);
+      }
       console.log(`Resuming job ${job.id}`);
     }
     const emitter = new EventEmitter();
@@ -184,6 +222,28 @@ async function main(): Promise<void> {
   console.error(`Unknown command: ${cmd}`);
   console.log(usage());
   process.exit(2);
+}
+
+async function runAuthPreflightForConfig(
+  cfg: JobConfig,
+  flags: Record<string, string>,
+  booleans: Record<string, boolean>,
+): Promise<boolean> {
+  const emitter = new EventEmitter();
+  emitter.on('log', (e: { text: string }) => process.stderr.write(e.text));
+  const result = await runAuthPreflight({
+    tenantId: cfg.auth?.tenantId,
+    clientId: cfg.auth?.clientId,
+    clientSecretEnvVar: cfg.auth?.clientSecretEnvVar,
+    useManagedIdentity: cfg.auth?.useManagedIdentity,
+    runGraph: cfg.mode === 'provision',
+    runWorkIq: !booleans['skip-workiq-auth'],
+    runEvalScoreA2A: shouldRunEvalScoreA2AFromEnv(),
+    runM365EvalEula: !!cfg.m365Eval?.acceptEula,
+    m365EvalPackageVersion: flags['m365-package-version'] || cfg.m365Eval?.packageVersion,
+  }, emitter);
+  console.log(formatAuthPreflightResult(result));
+  return result.passed;
 }
 
 function buildConfigFromFlags(flags: Record<string, string>, booleans: Record<string, boolean>): JobConfig {

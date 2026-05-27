@@ -8,6 +8,7 @@ const SRC_ROOT = path.resolve(REPO_ROOT, '..');
 
 export interface ToolPaths {
   evalGen: string;          // path to eval-gen dist/index.js
+  evalScore: string;        // path to eval-score node dist/index.js
   /** PowerShell script that converts EvalGen output to @microsoft/m365-copilot-eval JSON. */
   evalGenToM365Convert: string;
   /** Compiled TypeScript batch enhancer (dist/enhancer/enhance_for_copilot.js). Used by step 2. */
@@ -45,10 +46,12 @@ function resolveSkillRoot(): string {
 
 export function resolveTools(): ToolPaths {
   const evalGen = path.join(SRC_ROOT, 'EvaluationCLI', 'eval-gen', 'dist', 'index.js');
+  const evalScore = path.join(SRC_ROOT, 'EvaluationCLI', 'eval-score', 'node', 'dist', 'index.js');
   const evalGenToM365Convert = path.join(SRC_ROOT, 'EvaluationCLI', 'scripts', 'convert-evalgen-to-m365-copilot-eval.ps1');
   const templatesRoot = path.join(REPO_ROOT, 'templates');
   return {
     evalGen,
+    evalScore,
     evalGenToM365Convert,
     dataEnhancer: path.join(REPO_ROOT, 'dist', 'enhancer', 'enhance_for_copilot.js'),
     tsDataEnhancer: resolveTsEnhancer(),
@@ -85,6 +88,8 @@ export function probeTools(t: ToolPaths = resolveTools()): ToolStatus[] {
   const out: ToolStatus[] = [];
   out.push(probeFile('eval-gen', t.evalGen,
     'Build it: cd ..\\EvaluationCLI\\eval-gen && npm install && npm run build'));
+  out.push(probeFile('eval-score', t.evalScore,
+    'Build it: cd ..\\EvaluationCLI\\eval-score\\node && npm install && npm run build'));
   out.push(probeFile('eval-gen→m365-eval convert', t.evalGenToM365Convert,
     'Expected in ..\\EvaluationCLI\\scripts'));
   out.push(probeFile('data-enhancer (compiled)', t.dataEnhancer,
