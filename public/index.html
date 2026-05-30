@@ -34,6 +34,7 @@
             <option value="provision">Provision + ingest (requires credentials)</option>
           </select>
         </label>
+        <p id="build-mode-hint" class="hint">Build jobs produce artifacts only; Step 6 scoring and the Compare panel require provision mode.</p>
         <label>ACL mode
           <select name="aclMode">
             <option value="everyone">everyone</option>
@@ -41,6 +42,45 @@
             <option value="none">none (preserve item ACLs)</option>
           </select>
         </label>
+        <fieldset id="step2-fields">
+          <legend>Step 2 — enhancement</legend>
+          <label>
+            <input name="noEnhance" type="checkbox">
+            Skip enhancement (identity transform with shape-derived schema)
+          </label>
+          <p class="hint">When set, Step 2 still infers a Graph schema from the source data shape and writes <code>enhanced-items.jsonl</code> + <code>schema-suggestion.json</code> so Steps 3–6 run unchanged. See STREAMLINED_CONNECTOR_EVAL_PLAN.md &rarr; Step 2 (<code>--no-enhance</code>).</p>
+        </fieldset>
+        <fieldset id="eval-source-fields">
+          <legend>Step 1 — eval set source</legend>
+          <label>Eval set source
+            <select name="evalSource" id="eval-source-select">
+              <option value="generate">Generate a new eval set</option>
+              <option value="reuseFromJob">Reuse from a completed job</option>
+              <option value="reuseFromPath">Reuse from a folder path</option>
+            </select>
+          </label>
+          <div id="eval-source-reuse-job" hidden>
+            <label>Source job
+              <select name="reuseEvalFromJobId" id="reuse-eval-select">
+                <option value="">(loading…)</option>
+              </select>
+            </label>
+            <details>
+              <summary>Don't see your job? Paste an id</summary>
+              <label>Job id
+                <input type="text" name="reuseEvalFromJobIdPasted" id="reuse-eval-paste" placeholder="20260528-130000-abcdef">
+              </label>
+              <div id="reuse-eval-paste-hint" class="hint"></div>
+            </details>
+          </div>
+          <div id="eval-source-reuse-path" hidden>
+            <label>Eval set folder
+              <input type="text" name="evalSetPath" placeholder="C:\path\to\01-evalgen-folder">
+            </label>
+            <p class="hint">Folder must contain <code>eval.csv</code> and <code>eval.evalgen.json</code>.</p>
+          </div>
+          <p class="hint">For a paired enhanced/non-enhanced comparison, run the first job with "Generate", then run the second with "Reuse from a completed job" pointing at the first. This guarantees both jobs share the same eval-set hash, which the comparator requires.</p>
+        </fieldset>
         <fieldset id="auth-fields" hidden>
           <legend>Authentication (provision mode)</legend>
           <label>Tenant ID<input name="tenantId"></label>
@@ -50,28 +90,65 @@
           <p class="hint">Required Graph permissions (application + admin consent):
             <code>ExternalConnection.ReadWrite.OwnedBy</code>,
             <code>ExternalItem.ReadWrite.OwnedBy</code>.</p>
+          <button type="button" id="validate-auth-btn">Validate auth</button>
+          <pre id="validate-auth-result" class="hint"></pre>
         </fieldset>
-        <fieldset id="m365eval-fields" hidden>
-          <legend>Step 6 — @microsoft/m365-copilot-eval</legend>
-          <label><input name="runM365Eval" type="checkbox" id="run-m365-eval-cb"> Run scoring after ingest</label>
-          <div id="m365eval-detail" hidden>
-            <label>M365 Agent ID<input name="m365AgentId" placeholder="agent-guid"></label>
-            <label>System prompt file (optional)<input name="m365SystemPromptFile" placeholder="..\prompts\my-system-prompt.md"></label>
-            <label>Evaluators (comma-separated, default: Relevance,Coherence,Groundedness,Citations)
-              <input name="m365Evaluators" placeholder="Relevance,Coherence,Groundedness,Citations">
+        <fieldset id="score-fields" hidden>
+          <legend>Step 6 — score (provision mode only)</legend>
+          <label>Judge provider
+            <select name="judgeProvider" id="judge-provider-select">
+              <option value="github-copilot">GitHub Copilot CLI (default)</option>
+              <option value="workiq">Work IQ A2A (uses agents/eval-judge)</option>
+            </select>
+          </label>
+          <div id="judge-agent-row" hidden>
+            <label>Judge agent id
+              <input type="text" name="judgeAgentId" placeholder="T_<guid>.declarativeAgent">
             </label>
-            <label>Concurrency<input name="m365Concurrency" type="number" min="1" max="8" value="1"></label>
-            <label>Environment<input name="m365Environment" value="local"></label>
-            <label>Package version<input name="m365PackageVersion" value="latest"></label>
-            <label>Log level
-              <select name="m365LogLevel">
-                <option>info</option><option>debug</option><option>warning</option><option>error</option>
-              </select>
-            </label>
-            <label><input name="m365AcceptEula" type="checkbox"> Accept EULA (required on first use)</label>
-            <p class="hint">Requires Node.js ≥ 22.21.1. The agent ID is an M365 *agent* ID, not the connector ID. Step 6 runs only in provision mode.</p>
+            <p class="hint">Required when judge provider is Work IQ. Discover it via <code>scripts\setup-a2a.ps1</code> or query <code>https://workiq.svc.cloud.microsoft/a2a/.agents</code>.</p>
           </div>
+          <label>Candidate agent id
+            <input type="text" name="candidateAgentId" placeholder="T_<guid>.declarativeAgent">
+          </label>
+          <p class="hint">The M365 declarative agent under evaluation. See <a href="agents/eval-judge/README.md">agents/eval-judge/README.md</a> for publish + discovery steps. If left blank, Step 5 must populate <code>05-deploy/resources.json</code> for Step 6 to find an id.</p>
+          <p class="hint">Default judge (GitHub Copilot) requires the <code>copilot</code> CLI on the PATH and a signed-in session.</p>
         </fieldset>
+        <fieldset id="agent-fields">
+          <legend>Declarative agent + URLs</legend>
+          <label>Agent display name (optional)
+            <input type="text" name="agentName" placeholder="${connectorName} Assistant">
+          </label>
+          <label>Agent system instructions (optional)
+            <textarea name="agentInstructions" rows="3" placeholder="Auto-generated from description if blank"></textarea>
+          </label>
+          <label>URL prefix (optional)
+            <input type="text" name="urlPrefix" placeholder="https://wiki.example.com">
+          </label>
+          <p class="hint">When set, the data-enhancer uses this URL prefix for generated item URLs and the connector's <code>urlToItemResolver</code> is activated for Teams/Copilot unfurling.</p>
+        </fieldset>
+        <details id="run-controls">
+          <summary>Run controls (advanced)</summary>
+          <label>Start at step
+            <input type="text" name="startAt" list="step-names" placeholder="evalgen|enhance|schema|connector|deploy|score">
+          </label>
+          <label>Stop after step
+            <input type="text" name="stopAfter" list="step-names" placeholder="evalgen|enhance|schema|connector|deploy|score">
+          </label>
+          <label>Force steps (comma-separated)
+            <input type="text" name="forceSteps" list="step-names" placeholder="schema,connector">
+          </label>
+          <label><input type="checkbox" name="forceAllNew"> Force all steps (ignore cache)</label>
+          <label><input type="checkbox" name="authPreflight"> Run auth preflight before submit</label>
+          <label><input type="checkbox" name="skipWorkiqAuth"> Skip Work IQ MCP auth preflight</label>
+          <datalist id="step-names">
+            <option value="evalgen"></option>
+            <option value="enhance"></option>
+            <option value="schema"></option>
+            <option value="connector"></option>
+            <option value="deploy"></option>
+            <option value="score"></option>
+          </datalist>
+        </details>
         <button type="submit">Run pipeline</button>
       </form>
     </section>
@@ -84,6 +161,21 @@
       <div id="detail">Select a job to view progress.</div>
       <h3>Live log</h3>
       <pre id="log"></pre>
+    </section>
+    <section id="compare">
+      <h2>Compare two jobs</h2>
+      <p class="hint">Pick a scored, provision-mode job in each slot. The comparator requires exactly one job with <code>noEnhance=true</code>, matching <code>datasetHash</code>, and matching <code>evalSetHash</code>. Mismatched <code>judgeProvider</code> still produces a deterministic + operational report (with the semantic delta omitted).</p>
+      <label>Job A
+        <select id="compare-job-a"><option value="">— select —</option></select>
+      </label>
+      <label>Job B
+        <select id="compare-job-b"><option value="">— select —</option></select>
+      </label>
+      <button type="button" id="compare-btn">Run compare</button>
+      <div id="compare-summary"></div>
+      <h4>comparison-report.md</h4>
+      <pre id="compare-report"></pre>
+      <p><a id="compare-csv-link" href="#" hidden download>score-matrix.csv</a></p>
     </section>
   </main>
   <script src="app.js"></script>

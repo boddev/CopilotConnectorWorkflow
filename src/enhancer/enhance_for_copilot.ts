@@ -1987,10 +1987,18 @@ export function graphLikeItem(opts: {
       props[key] = value;
     }
   }
+  // Cap content.value to stay well under the Graph external-item request body
+  // limit (~4 KB observed for `Expected ',' or '}'` server-side parse failures
+  // on wide rows). Mirrors identity-transform.ts. 4000 chars is conservative;
+  // typed fields still live in `properties`.
+  const MAX_CONTENT_CHARS = 4000;
+  const cappedContent = content.length > MAX_CONTENT_CHARS
+    ? `${content.slice(0, MAX_CONTENT_CHARS)}\n…(truncated; ${content.length - MAX_CONTENT_CHARS} chars elided)`
+    : content;
   const item: Record<string, unknown> = {
     id: itemId,
     properties: props,
-    content: { type: "text", value: content },
+    content: { type: "text", value: cappedContent },
   };
   if (aclMode !== "none") {
     item.acl = [{ type: aclMode, value: aclMode, accessType: "grant" }];

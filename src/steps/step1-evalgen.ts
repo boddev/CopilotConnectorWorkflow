@@ -2,11 +2,33 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { StepRecord } from '../types';
 import { runProcess } from '../run';
-import { fileHash, dirHash, objectHash } from '../jobs';
+import { fileHash, dirHash, objectHash, ensureEvalSetHash, jobDir, loadJob } from '../jobs';
 import { isCached, stepInputsHash } from '../orchestrator';
 import { newStepRecord, startStep, finishStep, writeStepStatus } from './step-utils';
 import type { RunStepOptions } from '../orchestrator';
 import { prepareDatasetForWorkflow } from '../dataset-normalization';
+
+/**
+ * Resolve the source folder for --reuse-eval-from <jobId> or --eval-set <path>.
+ * Returns undefined if neither is set.
+ */
+function resolveEvalSetSource(job: import('../types').JobRecord): { sourceDir: string; sourceLabel: string } | undefined {
+  if (job.config.reuseEvalFromJobId) {
+    const src = path.join(jobDir(job.config.reuseEvalFromJobId), '01-evalgen');
+    if (!fs.existsSync(src)) {
+      throw new Error(`--reuse-eval-from job not found or has no 01-evalgen folder: ${job.config.reuseEvalFromJobId}`);
+    }
+    return { sourceDir: src, sourceLabel: `job ${job.config.reuseEvalFromJobId}` };
+  }
+  if (job.config.evalSetPath) {
+    const src = path.resolve(job.config.evalSetPath);
+    if (!fs.existsSync(src)) {
+      throw new Error(`--eval-set path not found: ${src}`);
+    }
+    return { sourceDir: src, sourceLabel: src };
+  }
+  return undefined;
+}
 
 /** Step 1: run eval-gen against the dataset and produce eval.csv + .evalgen.json. */
 export async function runStep1Evalgen(opts: RunStepOptions): Promise<StepRecord> {
@@ -18,6 +40,41 @@ export async function runStep1Evalgen(opts: RunStepOptions): Promise<StepRecord>
   const outputJson = path.join(stepDir, 'eval.evalgen.json');
   const outputReview = path.join(stepDir, 'eval-review.md');
   const logFile = path.join(stepDir, 'step.log');
+
+  // --reuse-eval-from <jobId> / --eval-set <path>: copy the eval set verbatim
+  // instead of running eval-gen. The plan's "Pairing two runs" recipe.
+  const reuseSource = resolveEvalSetSource(job);
+  if (reuseSource) {
+    startStep(rec);
+    const srcCsv = path.join(reuseSource.sourceDir, 'eval.csv');
+    const srcJson = path.join(reuseSource.sourceDir, 'eval.evalgen.json');
+    const srcReview = path.join(reuseSource.sourceDir, 'eval-review.md');
+    if (!fs.existsSync(srcCsv) || !fs.existsSync(srcJson)) {
+      finishStep(rec, 'failed', `eval-set source missing eval.csv or eval.evalgen.json: ${reuseSource.sourceDir}`);
+      writeStepStatus(stepDir, rec); return rec;
+    }
+    fs.copyFileSync(srcCsv, outputCsv);
+    fs.copyFileSync(srcJson, outputJson);
+    if (fs.existsSync(srcReview)) fs.copyFileSync(srcReview, outputReview);
+    rec.outputs = {
+      '01-evalgen/eval.csv': fileHash(outputCsv),
+      '01-evalgen/eval.evalgen.json': fileHash(outputJson),
+    };
+    if (fs.existsSync(outputReview)) rec.outputs['01-evalgen/eval-review.md'] = fileHash(outputReview);
+    rec.artifacts = Object.keys(rec.outputs).map((r) => path.join(job.workspace, r));
+    rec.diagnostics?.push(`reused eval set from ${reuseSource.sourceLabel}`);
+    ensureEvalSetHash(job);
+    if (job.config.reuseEvalFromJobId) {
+      const sourceJob = loadJob(job.config.reuseEvalFromJobId);
+      if (sourceJob?.evalSetHash && job.evalSetHash !== sourceJob.evalSetHash) {
+        finishStep(rec, 'failed',
+          `eval-set hash mismatch after copy: source=${sourceJob.evalSetHash} new=${job.evalSetHash}`);
+        writeStepStatus(stepDir, rec); return rec;
+      }
+    }
+    finishStep(rec, 'done');
+    writeStepStatus(stepDir, rec); return rec;
+  }
 
   if (!fs.existsSync(tools.evalGen)) {
     finishStep(rec, 'failed', `eval-gen not built. Expected ${tools.evalGen}. Build it: cd ..\\EvaluationCLI\\eval-gen && npm install && npm run build`);
@@ -46,6 +103,7 @@ export async function runStep1Evalgen(opts: RunStepOptions): Promise<StepRecord>
     rec.outputs = prev.outputs;
     rec.artifacts = [outputCsv, outputJson, outputReview].filter((p) => fs.existsSync(p));
     rec.diagnostics?.push('cache hit: inputs unchanged and outputs present');
+    ensureEvalSetHash(job);
     writeStepStatus(stepDir, rec); return rec;
   }
 
@@ -92,6 +150,7 @@ export async function runStep1Evalgen(opts: RunStepOptions): Promise<StepRecord>
   };
   if (fs.existsSync(outputReview)) rec.outputs['01-evalgen/eval-review.md'] = fileHash(outputReview);
   rec.artifacts = Object.keys(rec.outputs).map((r) => path.join(job.workspace, r));
+  ensureEvalSetHash(job);
   finishStep(rec, 'done');
   writeStepStatus(stepDir, rec);
   return rec;

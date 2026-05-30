@@ -6,9 +6,8 @@ import { EventEmitter } from 'events';
 import { createJob, loadJob, listJobs } from './jobs';
 import { runPipeline } from './orchestrator';
 import { resolveTools, probeTools } from './tools';
-import { JobConfig, RunMode, DeployTarget, StepName, ALL_STEPS, M365Evaluator } from './types';
-import { createCompareBatchRun, createCompareDatasetRun, formatCompareState } from './compare';
-import { executeCompareRun } from './compare-executor';
+import { JobConfig, RunMode, DeployTarget, StepName, ALL_STEPS, JudgeProvider } from './types';
+import { runCompare } from './compare-jobs';
 import { formatAuthPreflightResult, runAuthPreflight, shouldRunEvalScoreA2AFromEnv } from './auth-preflight';
 
 interface ParsedArgs {
@@ -38,15 +37,15 @@ function usage(): string {
 Commands:
   run         Create + run a new pipeline end-to-end
   resume      Resume an existing job (re-runs incomplete steps)
+  compare     Post-hoc compare two completed jobs (enhanced vs --no-enhance)
   status      Show job status
   list        List all jobs
   tools       Show detected tool paths and health
   auth        Validate Graph app credentials and seed WorkIQ/EvalScore auth
-  compare-dataset
-              Validate and plan one enhanced-vs-RAW comparison run
-  compare-batch
-              Validate and plan a batch enhanced-vs-RAW comparison run
   help        Show this message
+
+Removed in this version:
+  compare-dataset, compare-batch — use 'ccw run --no-enhance --reuse-eval-from <id>' + 'ccw compare'.
 
 Options for 'run':
   --dataset <path>              Path to dataset folder/file (required)
@@ -57,21 +56,27 @@ Options for 'run':
   --connector-name <name>       Display name (required)
   --connector-description <s>   Richer connector description (optional)
   --deploy-target <target>      azure-functions | azure-container-apps | both (default azure-functions)
-  --mode <mode>                 build | provision (default build)
+  --mode <mode>                 build | provision (default build). Step 6 only runs in provision mode.
+  --no-enhance                  Skip Step 2 enrichment. Step 2 still infers a Graph schema
+                                from the shape of the source data and emits 1:1 items.
+  --reuse-eval-from <jobId>     Step 1 copies the eval set from this prior job instead of
+                                generating a new one. Required to pair two runs for compare.
+  --eval-set <path>             Step 1 copies the eval set from this folder (eval.csv +
+                                eval.evalgen.json). Mutually exclusive with --reuse-eval-from.
+  --judge-provider <provider>   Step 6 semantic judge: github-copilot (default) | workiq.
+  --judge-agent-id <id>         Required when --judge-provider workiq is set; the eval-judge
+                                declarative agent id (T_<guid>.declarativeAgent).
+  --candidate-agent-id <id>     M365 candidate agent id (the agent under evaluation). When set,
+                                Step 5 reuses it instead of discovering a freshly published agent.
+  --skip-agent-publish          Skip auto-publishing the agent in Step 5 (via atk install); the
+                                operator must publish out-of-band and resume with --candidate-agent-id.
+  --evaluators <names>          Comma-separated evaluator names or "all" (Relevance, Coherence,
+                                Groundedness, Similarity). Default: eval-score's "Relevance,Coherence".
   --acl-mode <mode>             everyone | everyoneExceptGuests | none (default everyone)
   --tenant-id <id>              (provision mode) Entra tenant ID
   --client-id <id>              (provision mode) Entra client ID
   --client-secret-env <name>    Env var holding client secret
   --use-managed-identity        Use managed identity instead of secret
-  --run-m365-eval               Run optional Step 6 (@microsoft/m365-copilot-eval) after provision/ingest
-  --m365-agent-id <id>          M365 agent ID (required for step 6; AGENT id, not connector id)
-  --m365-system-prompt <path>   Optional system prompt markdown file
-  --m365-evaluators <csv>       Evaluators (default: Relevance,Coherence,Groundedness,Citations)
-  --m365-concurrency <n>        runevals --concurrency (default 1)
-  --m365-environment <env>      runevals --env (default 'local')
-  --m365-package-version <ver>  npx package version pin (default 'latest')
-  --m365-log-level <lvl>        debug|info|warning|error (default 'info')
-  --m365-accept-eula            Run 'runevals accept-eula' before evaluation
   --agent-name <name>           Declarative agent display name (default: "<connectorName> Assistant")
   --agent-instructions <text>   Declarative agent system instructions
   --agent-instructions-file <p> Read agent instructions from a file
@@ -79,7 +84,7 @@ Options for 'run':
                                 URL unfurling in Teams/Copilot via urlToItemResolver
   --force                       Force-re-run all steps
   --force-step <name>           Force one step (repeatable: e.g. --force-step schema)
-  --start-at <step>             Start at this step (evalgen|enhance|schema|connector|deploy|m365eval)
+  --start-at <step>             Start at this step (evalgen|enhance|schema|connector|deploy|score)
   --stop-after <step>           Stop after this step
   --auth-preflight              Validate auth before creating/running the job
   --skip-workiq-auth            With --auth-preflight, skip WorkIQ MCP auth seeding
@@ -88,6 +93,10 @@ Options for 'resume':
   --job <id>                    Job ID to resume (required)
   (plus --force, --force-step, --start-at, --stop-after as above)
 
+Options for 'compare':
+  --job <id>                    Job id (use twice; the two jobs must differ only by --no-enhance)
+  --output <dir>                Output directory for comparison-report.{md,json} + score-matrix.csv
+
 Options for 'auth':
   --tenant-id <id>              Entra tenant ID for Graph and delegated auth
   --client-id <id>              Graph connector app/client ID
@@ -95,18 +104,6 @@ Options for 'auth':
   --skip-graph                  Do not validate Graph client credentials
   --skip-workiq                 Do not start WorkIQ MCP auth preflight
   --eval-score-a2a              Seed EvalScore A2A MSAL device-code token cache
-  --m365-accept-eula            Accept @microsoft/m365-copilot-eval EULA
-  --m365-package-version <ver>  npx package version pin (default 'latest')
-
-Options for 'compare-dataset':
-   --config <path>                Dataset comparison JSON config (required)
-   --dry-run                      Validate config and write compare-state.json without external calls
-   Without --dry-run, builds enhanced + RAW connector projects. If config mode is
-   "provision", also provisions and ingests with the configured Graph app credentials.
-
-Options for 'compare-batch':
-   --manifest <path>              Batch manifest JSON with datasets[] (required)
-   --dry-run                      Validate manifest and write compare-state.json without external calls
 `;
 }
 
@@ -132,8 +129,6 @@ async function main(): Promise<void> {
       runGraph: !booleans['skip-graph'],
       runWorkIq: !booleans['skip-workiq'],
       runEvalScoreA2A: !!booleans['eval-score-a2a'] || shouldRunEvalScoreA2AFromEnv(),
-      runM365EvalEula: !!booleans['m365-accept-eula'],
-      m365EvalPackageVersion: flags['m365-package-version'],
     }, emitter);
     console.log(formatAuthPreflightResult(result));
     process.exit(result.passed ? 0 : 1);
@@ -154,33 +149,41 @@ async function main(): Promise<void> {
     console.log(JSON.stringify(j, null, 2));
     process.exit(0);
   }
-  if (cmd === 'compare-dataset') {
-    const config = flags.config;
-    if (!config) { console.error('--config <path> required'); process.exit(2); }
-    const state = createCompareDatasetRun(config, !!booleans['dry-run']);
-    console.log(formatCompareState(state));
-    if (!booleans['dry-run']) {
-      const emitter = new EventEmitter();
-      emitter.on('log', (e: { label?: string; text: string }) => process.stdout.write(e.text));
-      const result = await executeCompareRun(state, emitter);
-      console.log(`\nCompare execution ${result.state.status}. Report: ${result.reportPath}`);
-      process.exit(result.state.status === 'done' ? 0 : 1);
+  if (cmd === 'compare') {
+    // --job <id> is allowed twice; collect both occurrences from raw argv.
+    const argv = process.argv.slice(3); // after 'compare'
+    const jobIds: string[] = [];
+    let outputDir: string | undefined;
+    for (let i = 0; i < argv.length; i++) {
+      const a = argv[i];
+      if (a === '--job' && argv[i + 1]) { jobIds.push(argv[++i]); }
+      else if (a === '--output' && argv[i + 1]) { outputDir = argv[++i]; }
     }
-    process.exit(0);
+    if (jobIds.length !== 2) { console.error('ccw compare requires --job <id> twice'); process.exit(2); }
+    if (!outputDir) {
+      outputDir = path.resolve('workspace', 'compare-reports', `${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}-${jobIds[0]}-vs-${jobIds[1]}`);
+    } else {
+      outputDir = path.resolve(outputDir);
+    }
+    try {
+      const result = runCompare({ jobIdA: jobIds[0], jobIdB: jobIds[1], outputDir });
+      console.log(`Comparable: ${result.comparable}; semanticComparable: ${result.semanticComparable}`);
+      console.log(`Report: ${result.reportMdPath}`);
+      console.log(`Matrix: ${result.scoreMatrixPath}`);
+      for (const d of result.diagnostics) console.log(`  - ${d}`);
+      process.exit(result.comparable ? 0 : 1);
+    } catch (e) {
+      console.error(e instanceof Error ? e.message : String(e));
+      process.exit(2);
+    }
   }
-  if (cmd === 'compare-batch') {
-    const manifest = flags.manifest;
-    if (!manifest) { console.error('--manifest <path> required'); process.exit(2); }
-    const state = createCompareBatchRun(manifest, !!booleans['dry-run']);
-    console.log(formatCompareState(state));
-    if (!booleans['dry-run']) {
-      const emitter = new EventEmitter();
-      emitter.on('log', (e: { label?: string; text: string }) => process.stdout.write(e.text));
-      const result = await executeCompareRun(state, emitter);
-      console.log(`\nCompare execution ${result.state.status}. Report: ${result.reportPath}`);
-      process.exit(result.state.status === 'done' ? 0 : 1);
-    }
-    process.exit(0);
+  if (cmd === 'compare-dataset' || cmd === 'compare-batch') {
+    console.error(
+      `'${cmd}' was removed by STREAMLINED_CONNECTOR_EVAL_PLAN.md task 9.\n` +
+      `Use 'ccw run --no-enhance --reuse-eval-from <enhancedJobId> ...' to create a paired non-enhanced run,\n` +
+      `then 'ccw compare --job <enhancedJobId> --job <nonEnhancedJobId>' to diff them.`,
+    );
+    process.exit(2);
   }
   if (cmd === 'run' || cmd === 'resume') {
     let job;
@@ -239,8 +242,6 @@ async function runAuthPreflightForConfig(
     runGraph: cfg.mode === 'provision',
     runWorkIq: !booleans['skip-workiq-auth'],
     runEvalScoreA2A: shouldRunEvalScoreA2AFromEnv(),
-    runM365EvalEula: !!cfg.m365Eval?.acceptEula,
-    m365EvalPackageVersion: flags['m365-package-version'] || cfg.m365Eval?.packageVersion,
   }, emitter);
   console.log(formatAuthPreflightResult(result));
   return result.passed;
@@ -254,7 +255,6 @@ function buildConfigFromFlags(flags: Record<string, string>, booleans: Record<st
   };
   const mode = (flags.mode || 'build') as RunMode;
   const deployTarget = (flags['deploy-target'] || 'azure-functions') as DeployTarget;
-  const runM365Eval = !!booleans['run-m365-eval'];
   const cfg: JobConfig = {
     dataset: path.resolve(required('dataset')),
     description: required('description'),
@@ -266,7 +266,6 @@ function buildConfigFromFlags(flags: Record<string, string>, booleans: Record<st
     deployTarget,
     mode,
     aclMode: (flags['acl-mode'] || 'everyone') as JobConfig['aclMode'],
-    runM365Eval,
   };
   if (mode === 'provision') {
     cfg.auth = {
@@ -276,30 +275,39 @@ function buildConfigFromFlags(flags: Record<string, string>, booleans: Record<st
       useManagedIdentity: !!booleans['use-managed-identity'],
     };
   }
-  if (runM365Eval) {
-    if (!flags['m365-agent-id']) {
-      throw new Error('--m365-agent-id is required when --run-m365-eval is set');
-    }
-    const evals = flags['m365-evaluators']
-      ? flags['m365-evaluators'].split(',').map((s) => s.trim()).filter(Boolean) as M365Evaluator[]
-      : undefined;
-    cfg.m365Eval = {
-      agentId: flags['m365-agent-id'],
-      systemPromptFile: flags['m365-system-prompt'] ? path.resolve(flags['m365-system-prompt']) : undefined,
-      evaluators: evals,
-      concurrency: flags['m365-concurrency'] ? Number(flags['m365-concurrency']) : undefined,
-      environment: flags['m365-environment'],
-      packageVersion: flags['m365-package-version'],
-      logLevel: (flags['m365-log-level'] as 'debug' | 'info' | 'warning' | 'error') || undefined,
-      acceptEula: !!booleans['m365-accept-eula'],
-    };
-  }
   if (flags['agent-name']) cfg.agentName = flags['agent-name'];
   if (flags['agent-instructions']) cfg.agentInstructions = flags['agent-instructions'];
   if (flags['agent-instructions-file']) {
     cfg.agentInstructions = fs.readFileSync(path.resolve(flags['agent-instructions-file']), 'utf-8');
   }
   if (flags['url-prefix']) cfg.urlPrefix = flags['url-prefix'];
+
+  // Single-pipeline flags from STREAMLINED_CONNECTOR_EVAL_PLAN.md.
+  if (booleans['no-enhance']) cfg.noEnhance = true;
+  if (flags['reuse-eval-from'] && flags['eval-set']) {
+    throw new Error('--reuse-eval-from and --eval-set are mutually exclusive');
+  }
+  if (flags['reuse-eval-from']) cfg.reuseEvalFromJobId = flags['reuse-eval-from'];
+  if (flags['eval-set']) cfg.evalSetPath = path.resolve(flags['eval-set']);
+
+  const judgeProviderFlag = flags['judge-provider'];
+  if (judgeProviderFlag || flags['judge-agent-id'] || flags['candidate-agent-id'] || booleans['skip-agent-publish'] || flags['evaluators']) {
+    const judgeProvider = (judgeProviderFlag || 'github-copilot') as JudgeProvider;
+    if (judgeProvider !== 'github-copilot' && judgeProvider !== 'workiq') {
+      throw new Error(`--judge-provider must be 'github-copilot' or 'workiq', got '${judgeProvider}'`);
+    }
+    if (judgeProvider === 'workiq' && !flags['judge-agent-id']) {
+      throw new Error("--judge-agent-id is required when --judge-provider workiq is set");
+    }
+    cfg.score = {
+      judgeProvider,
+      judgeAgentId: flags['judge-agent-id'],
+      candidateAgentId: flags['candidate-agent-id'],
+      skipAgentPublish: booleans['skip-agent-publish'] || undefined,
+      evaluators: flags['evaluators'],
+    };
+  }
+
   return cfg;
 }
 

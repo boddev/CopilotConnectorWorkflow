@@ -102,11 +102,14 @@ function hardenSchema(suggestionProps: Array<Record<string, unknown>>): GraphCon
     if (!name || namesSeen.has(name)) continue;
     namesSeen.add(name);
     const type = coerceType(String(p.type || 'String'));
-    const isSearchable = bool(p.isSearchable, type === 'String');
     const isQueryable = bool(p.isQueryable, true);
     const isRetrievable = bool(p.isRetrievable, true);
-    // searchable and refinable are mutually exclusive — prefer searchable for String unless explicit refinable
+    // searchable + refinable are mutually exclusive — prefer searchable for String unless explicit refinable.
+    // Graph also rejects isExactMatchRequired on a searchable property — if both are requested,
+    // drop isSearchable (an exact-match column is rarely useful as full-text search).
     const wantsRefinable = bool(p.isRefinable, false);
+    let isSearchable = bool(p.isSearchable, type === 'String');
+    if (p.isExactMatchRequired && isSearchable) isSearchable = false;
     const finalRefinable = wantsRefinable && !isSearchable;
     const prop: GraphProperty = { name, type, isSearchable, isQueryable, isRetrievable };
     if (finalRefinable) prop.isRefinable = true;
@@ -134,9 +137,12 @@ function hardenSchema(suggestionProps: Array<Record<string, unknown>>): GraphCon
 }
 
 function sanitizeName(raw: string): string {
-  // Graph property names: alphanumeric + underscore, start with letter; max 32
-  let s = raw.replace(/[^A-Za-z0-9_]/g, '_');
-  if (!/^[A-Za-z]/.test(s)) s = `p_${s}`;
+  // Graph property names: ALPHANUMERIC only, must start with a letter, max 32 chars.
+  // Convert snake_case / kebab-case / dot.case to camelCase so identifiers stay readable.
+  let s = raw.replace(/[^A-Za-z0-9]+([A-Za-z0-9]?)/g, (_match, next: string) =>
+    next ? next.toUpperCase() : '',
+  );
+  if (!/^[A-Za-z]/.test(s)) s = `p${s}`;
   return s.slice(0, 32);
 }
 
@@ -168,7 +174,7 @@ function collectLabels(p: Record<string, unknown>, propName: string): string[] {
 function collectAliases(p: Record<string, unknown>): string[] {
   const out: string[] = [];
   const addAlias = (value: string): void => {
-    if (!/^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(value)) return;
+    if (!/^[A-Za-z][A-Za-z0-9]{0,31}$/.test(value)) return;
     if (!out.includes(value)) out.push(value);
   };
   if (Array.isArray(p.aliases)) {
@@ -226,15 +232,15 @@ function validateSchema(schema: GraphConnectorSchema): ValidationIssue[] {
     if (p.labels && !p.isRetrievable) {
       issues.push({ severity: 'error', message: `property '${p.name}' has labels but is not retrievable` });
     }
-    if (!/^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(p.name)) {
-      issues.push({ severity: 'error', message: `property name '${p.name}' invalid (must match ^[A-Za-z][A-Za-z0-9_]{0,31}$)` });
+    if (!/^[A-Za-z][A-Za-z0-9]{0,31}$/.test(p.name)) {
+      issues.push({ severity: 'error', message: `property name '${p.name}' invalid (must match ^[A-Za-z][A-Za-z0-9]{0,31}$)` });
     }
     if (p.name.toLowerCase() === 'content') {
       issues.push({ severity: 'error', message: `'content' is a reserved property; do not declare it in the schema` });
     }
     for (const alias of p.aliases || []) {
-      if (!/^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(alias)) {
-        issues.push({ severity: 'error', message: `property '${p.name}' alias '${alias}' invalid (must match ^[A-Za-z][A-Za-z0-9_]{0,31}$)` });
+      if (!/^[A-Za-z][A-Za-z0-9]{0,31}$/.test(alias)) {
+        issues.push({ severity: 'error', message: `property '${p.name}' alias '${alias}' invalid (must match ^[A-Za-z][A-Za-z0-9]{0,31}$)` });
       }
     }
   }

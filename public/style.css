@@ -29,3 +29,13 @@ button:hover { background: #0d3e6a; }
 .artifact-link { display: block; font-size: 0.8rem; color: #0f4c81; text-decoration: none; padding: 2px 0; }
 .artifact-link:hover { text-decoration: underline; }
 #log { background: #1e1e1e; color: #d4d4d4; padding: 8px; border-radius: 3px; max-height: 60vh; overflow: auto; font-family: Consolas, monospace; font-size: 0.78rem; white-space: pre-wrap; }
+.hint.bad { color: #b00020; }
+/* Slice 7: compare panel sits below the 3-column main grid as a full-width row. */
+#compare { grid-column: 1 / -1; }
+#compare-report { background: #fafafa; color: #222; border: 1px solid #ddd; padding: 8px; border-radius: 3px; max-height: 50vh; overflow: auto; font-family: Consolas, monospace; font-size: 0.78rem; white-space: pre-wrap; }
+#compare-csv-link { display: inline-block; margin-top: 6px; font-size: 0.85rem; color: #0f4c81; text-decoration: none; }
+#compare-csv-link:hover { text-decoration: underline; }
+/* Slice 8 badges */
+.badge { display: inline-block; font-size: 0.7rem; padding: 1px 6px; margin-left: 4px; border-radius: 10px; background: #e3edf6; color: #0f4c81; }
+.badge.legacy { background: #f5e0c5; color: #6b3a00; }
+.badge.no-enhance { background: #e8d5f0; color: #5a1d6a; }

@@ -2,20 +2,20 @@
   "$schema": "https://developer.microsoft.com/json-schemas/teams/v1.23/MicrosoftTeams.schema.json",
   "manifestVersion": "1.23",
   "version": "1.0.0",
-  "id": "5a32f8e8-6d5c-4ddd-9189-8d3d8c302519",
+  "id": "a57a7e3f-3937-4504-848e-91d87f64ed4d",
   "developer": {
-    "name": "Copilot Connector Workflow",
+    "name": "CCW Environment Enhanced 01",
     "websiteUrl": "https://example.com",
     "privacyUrl": "https://example.com/privacy",
     "termsOfUseUrl": "https://example.com/terms"
   },
   "name": {
-    "short": "Eval Judge",
-    "full": "Copilot Connector Workflow Eval Judge"
+    "short": "CCW Env Enhanced 01",
+    "full": "CCW Environment Enhanced 01 Assistant"
   },
   "description": {
-    "short": "Internal LLM-as-judge for the eval-score CLI.",
-    "full": "Internal Microsoft 365 Copilot declarative agent used by the Copilot Connector Workflow eval-score CLI. Scores candidate answers against expected answers using a supplied rubric and returns a deterministic integer 0-100 or strict JSON {\"score\": number, \"reason\": string}. No browsing, no connector knowledge, no tools."
+    "short": "Environmental indicators from World Bank and OWID covering CO2 emissions, greenh",
+    "full": "Environmental indicators from World Bank and OWID covering CO2 emissions, greenhouse gases, forest area, air pollution, and protected areas by country and year."
   },
   "icons": {
     "color": "icon-color.png",

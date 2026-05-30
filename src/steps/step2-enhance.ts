@@ -6,14 +6,20 @@ import { fileHash, dirHash } from '../jobs';
 import { isCached, stepInputsHash, RunStepOptions } from '../orchestrator';
 import { newStepRecord, startStep, finishStep, writeStepStatus } from './step-utils';
 import { prepareDatasetForWorkflow } from '../dataset-normalization';
+import { runIdentityTransform } from '../identity-transform';
 
-/** Step 2: run the bundled TypeScript data-enhancer against dataset + eval sidecar. */
+/** Step 2: enhance the dataset, or run the no-enhance identity transform. */
 export async function runStep2Enhance(opts: RunStepOptions): Promise<StepRecord> {
   const { job, tools, emitter, force } = opts;
   const rec = newStepRecord('enhance');
   const stepDir = path.join(job.workspace, '02-enhance');
   fs.mkdirSync(stepDir, { recursive: true });
   const logFile = path.join(stepDir, 'step.log');
+
+  // --no-enhance: run the identity-but-shape-aware transform.
+  if (job.config.noEnhance) {
+    return runNoEnhanceBranch(opts, rec, stepDir);
+  }
 
   if (!fs.existsSync(tools.dataEnhancer)) {
     finishStep(rec, 'failed',
@@ -89,6 +95,71 @@ export async function runStep2Enhance(opts: RunStepOptions): Promise<StepRecord>
   const missing = expected.filter((n) => !fs.existsSync(path.join(stepDir, n)));
   if (missing.length > 0) {
     finishStep(rec, 'failed', `data-enhancer missing outputs: ${missing.join(', ')}`);
+    writeStepStatus(stepDir, rec); return rec;
+  }
+  rec.outputs = {};
+  for (const name of expected) {
+    rec.outputs[`02-enhance/${name}`] = fileHash(path.join(stepDir, name));
+  }
+  rec.artifacts = expected.map((n) => path.join(stepDir, n));
+  finishStep(rec, 'done');
+  writeStepStatus(stepDir, rec);
+  return rec;
+}
+
+/**
+ * --no-enhance branch: identity-but-shape-aware transform. Emits the same two
+ * downstream files (enhanced-items.jsonl and schema-suggestion.json) so Steps
+ * 3-6 don't know the difference.
+ */
+async function runNoEnhanceBranch(
+  opts: RunStepOptions,
+  rec: StepRecord,
+  stepDir: string,
+): Promise<StepRecord> {
+  const { job, force } = opts;
+  const inputs = {
+    dataset: job.config.dataset,
+    datasetHash: dirHash(job.config.dataset),
+    aclMode: job.config.aclMode,
+    extensions: job.config.extensions || [],
+    urlPrefix: job.config.urlPrefix || '',
+    noEnhance: true,
+  };
+  const inputsHash = stepInputsHash([inputs]);
+  rec.inputsHash = inputsHash;
+
+  const prev = job.steps.enhance;
+  if (!force && isCached(prev.inputsHash, inputsHash, prev.outputs, job.workspace)) {
+    startStep(rec); finishStep(rec, 'skipped');
+    rec.outputs = prev.outputs;
+    rec.diagnostics?.push('cache hit (--no-enhance): inputs unchanged and outputs present');
+    writeStepStatus(stepDir, rec); return rec;
+  }
+
+  startStep(rec);
+  rec.diagnostics?.push('--no-enhance: running identity-but-shape-aware transform');
+  try {
+    const result = await runIdentityTransform({
+      dataset: job.config.dataset,
+      outputDir: stepDir,
+      aclMode: job.config.aclMode,
+      extensions: job.config.extensions,
+      urlPrefix: job.config.urlPrefix,
+    });
+    rec.diagnostics?.push(
+      `wrote ${result.itemCount} item(s) and ${result.schemaPropertyCount} schema property(ies)`,
+      `metadataProvenance: title=${result.metadataProvenance.titleFromSource} url=${result.metadataProvenance.urlFromSource} icon=${result.metadataProvenance.iconUrlFromSource}`,
+    );
+  } catch (e) {
+    finishStep(rec, 'failed', e instanceof Error ? e.message : String(e));
+    writeStepStatus(stepDir, rec); return rec;
+  }
+
+  const expected = ['enhanced-items.jsonl', 'schema-suggestion.json', 'identity-transform-report.json'];
+  const missing = expected.filter((n) => !fs.existsSync(path.join(stepDir, n)));
+  if (missing.length > 0) {
+    finishStep(rec, 'failed', `--no-enhance branch missing outputs: ${missing.join(', ')}`);
     writeStepStatus(stepDir, rec); return rec;
   }
   rec.outputs = {};

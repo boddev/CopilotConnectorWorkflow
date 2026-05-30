@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { JobRecord, JobConfig, StepName, StepRecord, ALL_STEPS } from './types';
+import { hashDataset, hashEvalSetFile } from './canonical-hash';
 
 const WORKSPACE_ROOT = path.resolve(__dirname, '..', 'workspace', 'jobs');
 
@@ -31,6 +32,12 @@ export function createJob(config: JobConfig): JobRecord {
   const now = new Date().toISOString();
   const steps = {} as Record<StepName, StepRecord>;
   for (const name of ALL_STEPS) steps[name] = { name, status: 'pending' };
+  let datasetHash: string | undefined;
+  try {
+    datasetHash = hashDataset(config.dataset, config.extensions).hash;
+  } catch {
+    // dataset hash is best-effort at job creation; jobs created before hashing was added still work.
+  }
   const job: JobRecord = {
     id,
     createdAt: now,
@@ -39,9 +46,23 @@ export function createJob(config: JobConfig): JobRecord {
     config,
     steps,
     workspace: dir,
+    datasetHash,
   };
   saveJob(job);
   return job;
+}
+
+/**
+ * Compute and record evalSetHash from this job's Step 1 output, if not already
+ * set. Called by Step 1 (and lazily by tools that need the hash on legacy jobs).
+ */
+export function ensureEvalSetHash(job: JobRecord): string | undefined {
+  if (job.evalSetHash) return job.evalSetHash;
+  const sidecar = path.join(job.workspace, '01-evalgen', 'eval.evalgen.json');
+  if (!fs.existsSync(sidecar)) return undefined;
+  job.evalSetHash = hashEvalSetFile(sidecar).hash;
+  saveJob(job);
+  return job.evalSetHash;
 }
 
 export function saveJob(job: JobRecord): void {
@@ -82,6 +103,23 @@ export function validateConfig(c: JobConfig): void {
     if (!c.auth?.clientId) throw new Error('provision mode requires auth.clientId');
     if (!c.auth.useManagedIdentity && !c.auth.clientSecretEnvVar) {
       throw new Error('provision mode requires either useManagedIdentity=true or clientSecretEnvVar');
+    }
+  }
+  // Eval-set source: reuseEvalFromJobId and evalSetPath are mutually exclusive.
+  if (c.reuseEvalFromJobId && c.evalSetPath) {
+    throw new Error('reuseEvalFromJobId and evalSetPath are mutually exclusive');
+  }
+  if (c.evalSetPath && !fs.existsSync(c.evalSetPath)) {
+    throw new Error(`evalSetPath does not exist: ${c.evalSetPath}`);
+  }
+  // Score configuration: judgeProvider enum and workiq->judgeAgentId.
+  if (c.score?.judgeProvider) {
+    const allowed = ['github-copilot', 'workiq'];
+    if (!allowed.includes(c.score.judgeProvider)) {
+      throw new Error(`score.judgeProvider must be one of ${allowed.join(', ')}; got '${c.score.judgeProvider}'`);
+    }
+    if (c.score.judgeProvider === 'workiq' && !c.score.judgeAgentId) {
+      throw new Error("score.judgeAgentId is required when score.judgeProvider is 'workiq'");
     }
   }
 }

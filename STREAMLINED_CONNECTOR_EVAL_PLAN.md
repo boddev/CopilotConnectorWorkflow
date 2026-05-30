@@ -2,18 +2,40 @@
 
 ## Goal
 
-Automate the end-to-end enhanced-vs-RAW Microsoft 365 Copilot Connector evaluation workflow so the same testing performed for the D&B dataset can be repeated across 25 additional datasets with minimal manual intervention.
+Automate the end-to-end enhanced-vs-non-enhanced Microsoft 365 Copilot Connector evaluation workflow so the same testing performed for the D&B dataset can be repeated across 25 additional datasets with minimal manual intervention.
 
-The target outcome is a single resumable batch command that, for each dataset:
+The target outcome is a single pipeline that runs the same six steps for every connector — enhanced and non-enhanced runs differ only by one flag on Step 2 — and a separate, post-hoc comparator that reads two completed runs and emits a combined report.
 
-1. Generates a 100-question EvalGen set.
-2. Creates and provisions an enhanced connector.
-3. Creates and provisions a RAW baseline connector.
-4. Creates two Copilot declarative agents, each scoped to exactly one connector.
-5. Waits until both connector indexes are queryable by Copilot.
-6. Collects actual M365 Copilot answers from both agents.
-7. Scores answers with both deterministic fact/assertion coverage and required semantic quality judging.
-8. Produces per-dataset and aggregate enhanced-vs-RAW comparison reports.
+## Execution model
+
+There are exactly two execution paths:
+
+1. **The pipeline** (`ccw run`): steps 1–6 run for every connector, in the same order, regardless of whether the source data is being enhanced. Configurable variation is limited to:
+   - `--no-enhance` (boolean) — Step 2 branch.
+   - `--mode build|provision` — gates the tenant-side substeps. `build` stops the job after the local artifacts (`enhanced-items.jsonl`, schema, connector project, deploy artifacts) are produced; **`build` jobs are not comparable** and Step 6 is skipped with a `requires-provision-mode` diagnostic. `provision` runs the full lifecycle and is required for `ccw compare`.
+   - `--reuse-eval-from <jobId>` *or* `--eval-set <path>` — Step 1 reuses an existing eval set verbatim instead of generating a new one. This is the only supported way to feed two paired runs the same prompts (and therefore the only way to compare them). See "Pairing two runs" below.
+   - `--judge-provider github-copilot|workiq` — Step 6 only; defaults to `github-copilot`.
+   - `--judge-agent-id <id>` — required when `--judge-provider workiq` is set.
+
+   The six steps:
+   1. `evalgen` — generate the eval set against the dataset, or reuse the eval set referenced by `--reuse-eval-from` / `--eval-set`.
+   2. `enhance` — when `--no-enhance` is not set, run the data enhancer; when `--no-enhance` is set, run an identity transform that still infers a Graph schema from the *shape* of the source data, sanitizes property names, deterministically handles nested JSON, and writes `enhanced-items.jsonl` + `schema-suggestion.json` in the same locations. Steps 3–6 do not know which branch ran.
+   3. `schema` — harden and validate the suggested schema.
+   4. `connector+agent` — render the Agents Toolkit project and the declarative agent.
+   5. `deploy` — render Azure deploy artifacts **and**, in `provision` mode, run the tenant-side lifecycle: create the external connection, register and poll the schema to completion, ingest items and verify item count, install/publish the declarative agent, and discover and persist the deployed agent id. In `build` mode this step is artifact-emission only.
+   6. `score` — score the run with `eval-score`. The judge defaults to GitHub Copilot (`--judge-provider github-copilot`); the Work IQ A2A + `agents\eval-judge\` path is the supported alternative when the GitHub Copilot judge is unavailable. Every `provision` run produces one canonical scored report; `build` runs skip this step.
+2. **The post-hoc comparator** (`ccw compare --job <id-a> --job <id-b>`): reads the scored reports from two previously completed `ccw run` jobs (both in `provision` mode, both reached Step 6 `done`) and produces a combined enhanced-vs-non-enhanced view. It never renders, builds, provisions, ingests, or calls Copilot itself.
+
+### Pairing two runs
+
+A meaningful `ccw compare` requires that the two runs differ **only** in whether enhancement ran. To enforce that:
+
+1. Run the **first** job normally: `ccw run --dataset <path> --mode provision …`. This generates `01-evalgen/eval.evalgen.json` from EvalGen.
+2. Run the **second** job reusing the first job's eval set: `ccw run --dataset <path> --no-enhance --mode provision --reuse-eval-from <firstJobId> …`. Step 1 copies the prior eval set + canaries instead of re-generating, so eval-set hash and canary-prompt set match exactly.
+3. Run `ccw compare --job <firstJobId> --job <secondJobId>`.
+
+The two-step pair is the supported unit of comparison. `ccw run` alone is also valid as a single-connector run when no comparison is intended.
+
 
 ## What slowed down the D&B run
 
@@ -23,310 +45,190 @@ The user-observed issues were accurate. The full list of material speed bumps wa
 |---|---|---|
 | Connector generation | The first generated connector had schema/runtime issues: JSONL records were stored in `.json` files, aliases were invalid for Graph payloads, `duns` mixed searchable and exact-match semantics, local env loading was incomplete, and the ingest path needed clearer raw-vs-enhanced behavior. | Make these generator/template invariants with regression tests so every dataset gets a valid connector on first render. |
 | Graph schema registration | Graph schema constraints were easy to violate, and schema registration is asynchronous. Item upserts can fail briefly even after schema creation appears accepted. | Add hard preflight validation, schema polling, and Graph write retry/backoff as first-class pipeline states. |
-| RAW baseline | The RAW connector had to be manually created for D&B. | Generate RAW and enhanced connectors as paired artifacts from the same dataset manifest. |
+| RAW baseline | The RAW connector had to be manually created for D&B. | Make `ccw run --no-enhance` produce the same artifacts as a normal run, with Step 2 emitting a shape-derived schema and 1:1 items; pair it with a post-hoc `ccw compare` so two ordinary runs can be diffed without a special "comparison mode". |
 | Agent package | The generated app package used an old Teams/declarative-agent manifest shape tied to outdated Teams schema expectations, not the current Copilot declarative agent package format. | Pin and validate the current M365 Copilot declarative agent manifest schema in tests and in the generator. |
 | Agent deployment | Agent IDs had to be discovered after deployment. | Automate agent package install/publish and persist agent IDs/title IDs in run state. |
 | EvalGen scale | EvalGen would not directly generate 100 questions because `--count` is capped at 25-50, so multiple runs and manual merges were needed. | Automate multi-batch generation with `--avoid-evalsets`, deduplication, and a target-count loop. |
 | Copilot response collection | WorkIQ/A2A response collection was slow, hit hourly Copilot request limits, and returned rate-limit messages as normal answers. | Use a resumable response queue with pacing, adaptive retry, backoff, and strict invalid-response detection before scoring. |
 | Device-code auth | Device-code auth was repeated many times because no durable WorkIQ delegated token cache existed initially, codes expired, stale codes were entered, and stopped/restarted processes lost the active flow. | Use a durable user-level token cache, one long-lived collector process, active-code tracking, silent refresh, and checkpointed resume after auth failures. |
-| Scoring package expectations | `@microsoft/m365-copilot-eval` includes Azure OpenAI LLM-as-judge evaluators. Azure OpenAI is not the preferred dependency for this workflow, but semantic quality scoring is still required. | Separate deterministic grounding checks from semantic quality judging. Default to a pluggable M365 Copilot or GitHub Copilot semantic judge, with Azure OpenAI only as an optional provider if explicitly enabled. |
+| Scoring package expectations | `@microsoft/m365-copilot-eval` includes Azure OpenAI LLM-as-judge evaluators. The workflow must not depend on Azure OpenAI, and using two parallel scoring tools (`@microsoft/m365-copilot-eval` for Step 6 plus the deterministic scorer in `src/scoring.ts`) has fragmented output. | Remove `@microsoft/m365-copilot-eval` entirely. Scoring on every run goes through `..\EvaluationCLI\eval-score`. Default judge is GitHub Copilot (`--judge-provider github-copilot`, runs through the local `copilot` CLI). Supported alternative is Work IQ A2A using `agents\eval-judge\` (`--judge-provider workiq --judge-agent-id <id>`). `src/scoring.ts`'s deterministic 80/20 grounding scorer folds into the same Step 6 so each job emits one canonical report carrying both deterministic and semantic scores plus the judge provider that produced them. |
 | Scoring validity | Early scores included rate-limit responses, making results invalid. | Block scoring unless both agents have zero blank, error, and rate-limit rows. |
 | Index readiness | The D&B run relied on ad hoc waiting/verification. Across 50 connectors, Copilot indexing latency can create false negatives if response collection starts too soon. | Add an explicit indexing-readiness gate using canary prompts and timeout reporting. |
 
-## Proposed automation architecture
+## Pipeline (single execution path)
 
-Add a new comparison workflow on top of the existing six-step pipeline:
-
-```text
-dataset manifest
-  -> normalize dataset
-  -> generate/merge eval set
-  -> generate enhanced connector
-  -> generate RAW connector
-  -> provision schemas and ingest both connectors
-  -> create enhanced and RAW agents
-  -> await Copilot indexing readiness
-  -> collect actual responses
-  -> local deterministic scoring
-  -> per-dataset report
-  -> aggregate report
-```
-
-## Repository ownership
-
-The automation should be split across three repositories so each layer owns the right responsibility.
-
-| Repository | Owns | Required changes |
-|---|---|---|
-| `C:\Users\bodonnell\src\CopilotConnectorSkill` | Generic connector and agent artifact guidance/templates used by GitHub Copilot CLI. | Phase 0 and the generic connector/agent artifact portions of Phase 1 should be implemented here so generated artifacts become deterministic across runs. RAW-baseline behavior belongs here only as an optional recipe triggered by the prompt/workflow, not as a default behavior. |
-| `C:\Users\bodonnell\src\CopilotConnectorWorkflow` | Batch orchestration, provisioning, response collection, scoring, state, and reporting. | Owns `compare-dataset`, `compare-batch`, run database, WorkIQ REST/A2A runner, semantic judging workflow, and aggregate reports. |
-| `C:\Users\bodonnell\src\EvaluationCLI` | EvalGen behavior and reusable eval-set generation utilities. | Only needs changes if EvalGen should natively support target counts above 50, multi-batch generation, stronger deduplication, or stable machine-readable output contracts. Otherwise the workflow can wrap existing EvalGen behavior. |
-
-### Copilot Connector Skill changes
-
-Phase 0 and the generic connector/agent artifact part of Phase 1 should be moved into the Copilot Connector Skill because that skill is what instructs GitHub Copilot CLI how to build connectors.
-
-The skill must remain a **generic Copilot Connector skill**. It should produce connector artifacts based on the prompt and dataset provided. RAW-baseline behavior should not be baked into default connector generation. It should be documented as an optional pattern that is applied only when the user prompt or workflow explicitly requests a RAW baseline, comparison connector, unenhanced control connector, or similar.
-
-Required skill updates:
-
-- Add a deterministic connector-generation checklist to `copilot-connector\SKILL.md`.
-- Update Agents Toolkit samples so generated projects use the current M365 Copilot declarative-agent package format, not stale Teams manifest assumptions.
-- Add optional sample/template guidance for paired enhanced and RAW connectors, clearly labeled as comparison-workflow guidance rather than the default connector path.
-- Add schema hardening rules directly to the skill guidance:
-  - strip invalid Graph aliases before Graph payload creation,
-  - prevent searchable plus exact-match conflicts,
-  - enforce semantic labels for `title`, `url`, and `iconUrl`,
-  - require schema polling before ingestion,
-  - require retry/backoff for transient Graph upsert failures.
-- Add an optional RAW-baseline recipe:
-  - identity transform only,
-  - no enhancer invocation,
-  - deterministic title/URL fallbacks only,
-  - raw content preserved for baseline comparison.
-- Add validation examples/tests in the skill repo for representative source shapes: CSV, JSON array, JSONL-as-`.json`, nested JSON, and sparse records.
-- Add prompt examples that distinguish:
-  - normal enhanced connector generation,
-  - connector generation where the user opts out of enhancement,
-  - comparison workflows where the user explicitly requests enhanced plus RAW baseline artifacts.
-
-The workflow repo should then consume the skill output and validate it. It should not rely on ad hoc manual connector refactoring once the skill has been corrected.
-
-Recommended CLI surface:
-
-```powershell
-node dist\cli.js compare-dataset --config .\datasets\dnb.compare.json
-node dist\cli.js compare-batch --manifest .\datasets\batch-25.json --resume
-```
-
-### Batch manifest
-
-Create a manifest-driven batch runner rather than passing dozens of flags per run.
-
-Example:
-
-```json
-{
-  "tenantId": "976f427e-0d86-4ecf-ace3-4d1368eb8358",
-  "authProfile": "boddev-workiq",
-  "evalQuestionTarget": 100,
-  "promptDelaySeconds": 30,
-  "datasets": [
-    {
-      "slug": "dnb",
-      "path": "C:\\Users\\bodonnell\\src\\CopilotConnectorWorkflow\\data\\dnbData",
-      "description": "D&B business entity records...",
-      "connectorPrefix": "ccwdnb",
-      "displayName": "CCW D&B Data"
-    }
-  ]
-}
-```
-
-The batch runner should write a single persistent run database, preferably SQLite:
-
-| Table | Purpose |
-|---|---|
-| `datasets` | Dataset path, slug, description, state, timings, errors. |
-| `connectors` | Enhanced/RAW connection IDs, schema status, item counts, ingestion status. |
-| `agents` | App IDs, package paths, deployed agent IDs/title IDs, connector binding. |
-| `questions` | EvalGen questions, category, expected answer, assertions, source mapping. |
-| `responses` | Per-agent actual answer, citations, raw response metadata, retry state. |
-| `scores` | Per-agent score, assertion/fact pass counts, pass/partial/fail. |
-| `events` | Auditable log of state transitions, auth events, rate-limit events, retries. |
-
-## Connector generation improvements
-
-### Enhanced connector
-
-Make the current D&B fixes default behavior:
-
-- Normalize source files before EvalGen/enhancement, including JSONL records disguised as `.json`.
-- Always route full and incremental crawls through the data enhancer before Graph upsert.
-- Fail closed if enhancement fails; never silently fall back to raw ingestion.
-- Ensure generated items always have `title`, `url`, and `iconUrl` semantic labels or deterministic fallbacks.
-- Validate content length and item payloads against Graph limits before ingestion.
-- Load local settings consistently from `local.settings.json`, `.env.local`, and `.env.local.user`.
-- Poll schema registration until complete before item ingestion.
-- Retry transient Graph failures and schema-not-ready item upsert failures.
-
-### RAW connector
-
-Generate the RAW baseline automatically from the same dataset only when the comparison workflow or user prompt explicitly requests it:
-
-- Use an identity transform over source fields.
-- Do not call the enhancer.
-- Store the original record as raw content where practical.
-- Use deterministic title and URL derivation only so the RAW connector remains queryable but not enhanced.
-- Generate a safe raw schema that obeys Graph invariants.
-- Add tests that assert optional RAW generation invokes zero enhancer code paths.
-
-### Schema hardening
-
-Promote schema issues from runtime failures to build-time validation:
-
-- Reject or strip Graph-invalid aliases before provisioning.
-- Enforce `searchable` and `refinable` mutual exclusivity.
-- Enforce `isExactMatchRequired` only on non-searchable properties.
-- Ensure semantic labels map to exactly one retrievable property.
-- Ensure `title`, `url`, and `iconUrl` labels are present.
-- Verify collection properties include required `@odata.type` annotations in sample payloads.
-- Run generator tests against representative dataset shapes: CSV, JSON array, JSONL-as-`.json`, nested JSON, and sparse records.
-
-## Agent generation and deployment improvements
-
-Replace the old Teams-tied manifest template with a pinned current M365 Copilot declarative-agent package template.
-
-Requirements:
-
-- Generate two app packages per dataset:
-  - Enhanced agent bound only to the enhanced connection ID.
-  - RAW agent bound only to the RAW connection ID.
-- Use deterministic package and manifest IDs derived from dataset slug plus `enhanced`/`raw`.
-- Validate each package before install:
-  - Current manifest schema/version is pinned.
-  - Declarative agent file is referenced correctly.
-  - `GraphConnectors` capability has exactly one connection ID.
-  - No other external data source/capability is enabled.
-- Persist deployed agent IDs/title IDs into the run database.
-- Add a tested deprovision path that removes agents and connector connections in reverse order.
-
-Recommended state order:
+Every connector goes through the same six steps in the same order. The only configurable variation is `--no-enhance`, which changes the *contents* of Step 2's output but not the file paths, downstream code paths, or per-step contract. Steps 3–6 have no knowledge of whether enhancement ran.
 
 ```text
-render connector
-  -> provision external connection
-  -> register schema and poll completion
-  -> ingest items and verify item count
-  -> render agent package with final connection ID
-  -> validate agent package
-  -> install/publish agent
-  -> discover and store agent ID
+ccw run --dataset <path> [--no-enhance]
+  Step 1: evalgen      -> 01-evalgen/eval.csv, eval.evalgen.json, eval-review.md
+  Step 2: enhance      -> 02-enhance/enhanced-items.jsonl, schema-suggestion.json
+           or identity     (same outputs; --no-enhance produces shape-derived schema + 1:1 items)
+  Step 3: schema       -> 03-schema/connector-schema.json, schema.ts, schema-validation.json
+  Step 4: connector    -> 04-connector/connector/ (Agents Toolkit project + declarative agent)
+  Step 5: deploy       -> 04-connector/connector/deploy/{azure-functions,azure-container-apps}/
+  Step 6: score        -> 06-score/agent-response-scores.{json,md}, eval-score-results.json
 ```
 
-## Indexing readiness gate
+### Step 1 — evalgen
 
-Do not start response collection immediately after ingestion. Add an `await-indexing` state for both connectors.
-
-Readiness strategy:
-
-1. During EvalGen or enhancement, select one or more canary facts per dataset that should be easy to answer.
-2. Query each agent periodically with a canary prompt.
-3. Require a non-empty, non-rate-limited answer that includes expected canary content and preferably a citation.
-4. Enforce a minimum wait floor and maximum wait ceiling.
-5. Persist `indexReadyAt`, canary prompts, canary answers, and readiness attempts.
-6. If readiness never succeeds, mark the dataset as not comparable and exclude it from aggregate winner calculations.
-
-This avoids scoring agents against data that has been ingested but is not yet available to Copilot.
-
-## EvalGen automation
-
-EvalGen cannot reliably produce 100 questions in one call because its count range is 25-50. Automate the D&B workaround:
+Generate the eval set for this job. The eval set must be large enough to drive a meaningful score (target 100 prompts per dataset for the 25-dataset run). Because EvalGen's `--count` is capped at 25–50, this step iterates:
 
 1. Run EvalGen with the maximum allowed count.
 2. Run additional batches using `--avoid-evalsets` against prior outputs.
 3. Deduplicate by normalized prompt text and source row.
 4. Add near-duplicate detection using n-gram similarity so paraphrased duplicates do not inflate the set.
 5. Stop when the target count is reached or a configured attempt cap is hit.
-6. If fewer than 100 distinct questions are possible, continue with the actual count and report `actualQuestionCount`.
-7. Merge `eval.csv`, `eval.evalgen.json`, and review markdown into a canonical `eval-combined` folder.
+6. If fewer than 100 distinct questions are possible, continue with the actual count and persist `actualQuestionCount` in step state.
+7. Write the merged `eval.csv`, `eval.evalgen.json`, and review markdown.
 
-## Response collection improvements
+Also pick **canary facts** — a small set of high-confidence prompts whose answers should be trivially derivable from a successfully indexed connector. Step 6 uses them as the indexing-readiness gate. Canary prompts are stored alongside the eval set.
 
-Replace ad hoc per-run Python scripts with a reusable WorkIQ/A2A response runner.
+### Step 2 — enhance (default) or identity (`--no-enhance`)
 
-The D&B collector was already using the WorkIQ REST/A2A endpoint directly:
+Both branches read the source dataset, write the same two files (`enhanced-items.jsonl` and `schema-suggestion.json`), and fail closed on error. They differ only in transform.
 
-```text
-https://graph.microsoft.com/rp/workiq/{agentId}
+**Default (`--no-enhance` not set):** Run the bundled TypeScript enhancer (`src/enhancer/enhance_for_copilot.ts`). It infers a domain, flattens nested JSON, normalizes ISO/year/code fields, pivots long-format indicator tables to wide-form records, adds synthetic properties (`recordId`, `summary`, `recordType`, `lastModified`, `domain`), adds domain-specific property packs, derives semantic title / url / icon, optionally folds matching EvalGen prompts and answers into item content, and optionally emits per-file overview items.
+
+**`--no-enhance` set:** Run an identity-but-shape-aware transform:
+
+- Walk the source rows once to infer field types and the column list.
+- Default any CSV/TSV column to `String` unless **every** non-empty row parses as numeric or DateTime *and* the column name does not match any preserve-as-string heuristic. Preserve as `String` at minimum: any column whose name contains or ends with `id`, `code`, `key`, `no`, `num`, `iso`, `zip`, `postal`, `phone`, `fax`, `npi`, `duns`, `taxonomy`, `account`; any column whose name is exactly `year`, `month`, `quarter`, `period`, `fiscal_year`, `week`, `date`, `time`, `timestamp`; any column whose values contain leading zeros, exceed JS safe integer range, or use scientific notation. This list is at least as broad as the enhancer's `PRESERVE_NUMERIC_*` rules in `src/enhancer/enhance_for_copilot.ts:19-25`.
+- Sanitize every source column name to a Graph-valid schema property name (`^[A-Za-z][A-Za-z0-9_]{0,31}$`): strip non-alphanumerics, prepend an alphabetical prefix when the leading character is a digit, truncate to 32 chars. When two source columns collide after sanitization, append a deterministic suffix (`_1`, `_2`, …) to preserve uniqueness. Record the (originalColumn → schemaProperty) mapping in `schema-suggestion.json` under `sourceFieldMappings` so the comparator and downstream tooling can recover the raw column name.
+- Write `schema-suggestion.json` containing one property per sanitized column with defaults: `isSearchable: true` for textual columns, `isQueryable: true` and `isRetrievable: true` for everything; `isRefinable` left off by default; `isExactMatchRequired` set on columns flagged as identifiers above.
+- Auto-inject `title`, `url`, and `iconUrl` semantic labels: prefer matching source columns when present (a sanitized property literally named `title` / `url` / `iconUrl`, or one of `name`, `headline`, `subject` for title; `link`, `permalink`, `sourceUrl` for url; `icon`, `image`, `thumbnail` for iconUrl), otherwise emit deterministic fallbacks (title = best literal match or `<sourceFile> row <n>`, url = `file:///raw/<path>#row-<n>` or the `--url-prefix` variant, iconUrl = default file icon).
+- Handle nested JSON deterministically: flatten nested objects to dotted paths (`address.city`, `address.zip`), stringify nested arrays of scalars as comma-joined values, and stringify nested arrays of objects as compact JSON. This is required for Graph property compatibility but adds no enhancer-style enrichment (no semantic field promotion, no domain inference, no alias rewriting).
+- Emit one external item per source record with `properties` keyed by the sanitized schema property names (not the raw source column names) and `content.value` containing the rendered record text for full-text search. The raw column names live only in `sourceFieldMappings`.
+- Record provenance per item-shaping decision in `schema-suggestion.json` so the canonical scored report can later flag whether `title`/`url`/`iconUrl` came from a real source field or a deterministic fallback. The comparator surfaces this so a non-enhanced loss can be partly attributed to "no source title column" vs. "answer-quality loss".
+- Do not invoke any enhancer code paths. Do not pivot long-form tables, do not add synthetic properties (`recordId`, `summary`, `recordType`, `lastModified`, `domain`), do not fold in EvalGen prompts, do not chunk documents, do not run domain inference.
+
+After this change, **the only difference between an enhanced run and a non-enhanced run** is what Step 2 chose to do. Steps 3–6 cannot distinguish them.
+
+### Step 3 — schema hardening
+
+Same code, both branches:
+
+- Reject property names that don't match `^[A-Za-z][A-Za-z0-9_]{0,31}$`.
+- Enforce `searchable` and `refinable` mutual exclusivity.
+- Enforce `isExactMatchRequired` only on non-searchable properties.
+- Enforce ≤128 properties total and exactly one property per semantic label.
+- Auto-inject `title` / `url` semantic labels onto existing properties; auto-promote `iconUrl` if a matching property exists.
+- Strip Graph-invalid aliases before payload creation.
+- Reject reserved property names (`content`).
+- Sample-validate 200 items from `enhanced-items.jsonl`: valid JSON, ID present, URL-safe, ≤4 MB, types match, DateTimes ISO-formatted.
+- Block on any error-severity finding.
+
+### Step 4 — connector + agent
+
+Render the Agents Toolkit project under `04-connector/connector/` with:
+
+- Programmatically emitted `appPackage/manifest.json` against the pinned current Teams manifest schema (`teams/v1.23/MicrosoftTeams.schema.json`).
+- Programmatically emitted `appPackage/declarativeAgent.json` against `copilot/declarative-agent/v1.0/schema.json`, scoped to a single `GraphConnectors` capability containing this connector id and no other external data source.
+- `appPackage/instruction.txt` carrying the per-connector system prompt.
+- Deterministic agent and package ids derived from the connector id, so re-runs produce the same agent rather than orphaned duplicates.
+- `provision.ts` that polls schema registration to completion and retries transient Graph upsert failures.
+- `ingest.ts` that fails closed when the enhancer fails on a per-item basis (relevant only when this is a default — non-`--no-enhance` — run with a runtime enhancer).
+- `deprovision.ts` that removes the connection and items in reverse order.
+- Validate the package before install: manifest schema/version pinned, declarative agent file referenced correctly, exactly one `GraphConnectors` connection, no other capabilities enabled.
+- After install / publish, discover and persist the deployed agent id alongside the job record.
+
+### Step 5 — deploy (artifacts + tenant-side lifecycle)
+
+Step 5 has two responsibilities that run in this order, gated by `--mode`:
+
+1. **Always — artifact rendering.** Emit Azure Functions and/or Container Apps deploy artifacts (PowerShell, Bicep, Dockerfile, deploy README) into `04-connector/connector/deploy/{azure-functions,azure-container-apps}/`. No tenant calls. This is what `build` jobs stop after.
+2. **`provision` mode only — tenant-side lifecycle.** Run the generated connector's lifecycle in this exact order, with each substep persisted under `05-deploy/`:
+
+   1. `npm install && npm run build` against `04-connector/connector/` (verifies the project compiles before any tenant write).
+   2. `npm run provision` — create the external connection, register the schema with `Prefer: respond-async`, and poll until schema registration completes (15-minute ceiling). Persist `connectionId`, `schemaRegisteredAt`.
+   3. `npm run ingest` — push items from `enhanced-items.jsonl` and verify the post-ingestion item count matches the JSONL line count within tolerance. Persist `ingestStartedAt`, `ingestEndedAt`, `itemsIngested`.
+   4. Validate the app package (manifest schema/version pinned, single `GraphConnectors` capability bound to this connector id, no other capabilities).
+   5. Install/publish the declarative agent via the Microsoft 365 Agents Toolkit CLI (`atk install --file-path appPackage.zip`) and discover the deployed `agentId` from the toolkit's `TitleId` output. Persist `appId`, `agentId`, `publishedAt`. **This is automated when `atk` is on `PATH`**: Step 5 zips `04-connector/connector/appPackage/`, invokes `atk install`, parses the `TitleId`, and writes `agentId = "<TitleId>.declarativeAgent"` into `05-deploy/resources.json`. When `atk` is missing or `--skip-agent-publish` (config `score.skipAgentPublish`) is set, Step 5 records a manual-publish marker; the operator runs `atk install` (or publishes via Agents Toolkit UI / `teamsapp publish`) and resumes with `--candidate-agent-id <T_*.declarativeAgent>`.
+
+   If any tenant substep fails, Step 5 fails the job and Step 6 is not run. Step 5's tenant substeps are idempotent: a re-run with the same `connectorId` reuses the existing connection unless `--replace` is set (see "Connector lifecycle and collisions" below).
+
+`build`-mode jobs stop at substep 1 of (1) and are explicitly marked **not comparable**. `ccw compare` refuses to read them.
+
+### Step 6 — score
+
+Step 6 runs on every **`provision`-mode** `ccw run` (build jobs skip it with a `requires-provision-mode` diagnostic). It produces one canonical scored report per job, carrying both deterministic and semantic scores. `@microsoft/m365-copilot-eval` is not used at any point.
+
+**Response collection** always goes through Work IQ A2A: `eval-score` calls the candidate M365 declarative agent (whose id was discovered and persisted in Step 5) via `WorkIQClient` to get the candidate's answer to each eval prompt. There is no other way to reach an M365 Copilot declarative agent programmatically.
+
+**Semantic judging** has a default and a supported alternative:
+
+| Mode | Judge provider | When to use | Requirements |
+|---|---|---|---|
+| **Default** | `--judge-provider github-copilot` | Normal interactive or supervised runs. The judge runs locally through the `copilot` CLI, so it does not consume per-hour Work IQ rate limit on top of response collection, and it does not require the Work IQ first-party SP to be provisioned. **Important:** `EvaluationCLI/eval-score`'s built-in CLI default is `workiq`; the workflow's Step 6 wrapper must pass `--judge-provider github-copilot` explicitly. | `copilot` (GitHub Copilot CLI) on the PATH and signed in; an interactive session that survives the run's duration; optional `EVALSCORE_GITHUB_COPILOT_MODEL` / `EVALSCORE_GITHUB_COPILOT_COMMAND` overrides. |
+| **Alternative** | `--judge-provider workiq --judge-agent-id <eval-judge-agent>` | Long unattended runs, headless CI, when GitHub Copilot CLI is not available, when the operator wants judging to stay inside Microsoft 365 Copilot for compliance / parity reasons, or when calibrating GitHub-judged scores against Work-IQ-judged scores. | The `agents\eval-judge\` declarative agent published in the tenant and discovered through the A2A `/.agents` endpoint; same delegated Work IQ token already used for response collection. |
+
+Step 6 has five sub-stages, identical regardless of which judge is selected:
+
+1. **Judge preflight.** Run a 2-3 prompt canary against the chosen judge (any short response is fine; the canary verifies the judge process is reachable, signed in, and not rate-limited). For GitHub Copilot this confirms `copilot --silent -p <prompt>` returns within a sane timeout. Record the judge model/provider metadata into the report. If preflight fails, Step 6 fails closed — the workflow never silently downgrades to a different provider.
+2. **Indexing-readiness gate.** Query the candidate agent with the canary prompts from Step 1 until each returns a non-empty, non-rate-limited answer that includes the expected canary content and preferably a citation. Enforce a minimum wait floor (default 5 minutes) and a maximum wait ceiling (default 90 minutes). Persist `indexReadyAt`, the canary prompts, the canary answers, and the readiness attempts. If readiness never succeeds inside the ceiling, mark the job `not-comparable` and skip the remaining sub-stages. Canary prompts must be selected during Step 1 to favour the dataset's *common case* (not the easiest possible question) so that "ready" implies "comparable for the full eval set".
+3. **Response collection + judging.** Invoke `eval-score` against Work IQ A2A for response collection, with the selected judge handling the semantic score:
+
+    ```powershell
+    # Default — GitHub Copilot judge
+    eval-score `
+      --input          <jobWorkspace>\01-evalgen\eval.csv `
+      --m365-agent-id  <candidate-agent> `
+      --judge-provider github-copilot `
+      --tenant-id      <tenant> `
+      --output-dir     <jobWorkspace>\06-score
+
+    # Alternative — Work IQ + eval-judge declarative agent
+    eval-score `
+      --input          <jobWorkspace>\01-evalgen\eval.csv `
+      --m365-agent-id  <candidate-agent> `
+      --judge-provider workiq `
+      --judge-agent-id <eval-judge-agent> `
+      --tenant-id      <tenant> `
+      --output-dir     <jobWorkspace>\06-score
+    ```
+
+    Use a long-lived runner with adaptive exponential backoff and durable per-question checkpointing. Treat blank answers, explicit errors, HTTP 429/503, and any known rate-limit text as invalid (rate-limit detection must be a broader matcher than one exact string). Invalid rows are retried; they never reach scoring. The same rules apply to judge responses regardless of provider.
+4. **Invalid-row gate (normalization wrapper).** `eval-score` today writes empty-answer scores as `0` and on judge errors records score `0` with metadata, rather than failing closed (see `EvaluationCLI/eval-score/node/src/scorer.ts:49-108`). Step 6 must therefore wrap `eval-score`'s output: read the completed eval rows, treat any row with `error`, an `[ERROR:]`-prefixed answer, a blank answer, a fallback-provider judge result, or a malformed/non-JSON judge response as **invalid**, retry it through `eval-score` (up to a configured retry cap), and fail the job if any invalid row remains. The normalization wrapper is also responsible for mapping `eval-score`'s output schema into the canonical per-job report shape below.
+5. **Deterministic grounding score.** Fold the deterministic 80/20 assertion + supporting-fact scorer currently in `src/scoring.ts` into the same normalization wrapper so the canonical `agent-response-scores.json` carries both scores alongside the per-question response, citation flag, no-result detection, and per-category averages.
+
+Step 6 fails the job if the judge preflight fails, if the indexing gate never succeeds, if any invalid response remains after retry exhaustion, or if any judge response remains blank, malformed, or non-JSON. If the default judge provider fails outright (e.g. `copilot` CLI is missing on the host), Step 6 fails closed; the operator opts into the Work IQ judge by explicitly setting `--judge-provider workiq` on the next attempt. The workflow never silently downgrades or upgrades providers.
+
+The per-job scored report carries the judge provider that produced it and provenance flags for the comparator:
+
+```json
+{
+  "jobId": "...",
+  "noEnhance": false,
+  "judgeProvider": "github-copilot",
+  "judgeModel": "...",
+  "datasetHash": "sha256:...",
+  "evalSetHash": "sha256:...",
+  "indexReadyAt": "2026-...",
+  "promptCount": 100,
+  "validPromptCount": 100,
+  "metadataProvenance": {
+    "titleFromSource": 0.92,
+    "urlFromSource": 0.0,
+    "iconUrlFromSource": 0.0,
+    "schemaPropertiesPromotedToSearchable": 12,
+    "schemaPropertiesPromotedToRefinable": 0
+  },
+  "deterministicScore": { "average": 0, "passCount": 0, "partialCount": 0, "failCount": 0, "byCategory": {} },
+  "semanticScore": { "average": 0, "byDimension": { "relevance": 0, "correctness": 0, "completeness": 0, "groundedness": 0, "citationQuality": 0, "clarity": 0 } },
+  "citationRate": 0,
+  "retryCount": 0,
+  "rateLimitCount": 0,
+  "items": [ { "id": "...", "prompt": "...", "expected": "...", "actual": "...", "deterministic": { /* ... */ }, "semantic": { /* ... */ } } ]
+}
 ```
 
-with the required header:
+`metadataProvenance` lets the comparator attribute deltas between "real enhancer wins" and "non-enhanced lost because there was no source `title` column", rather than treating both as undifferentiated semantic-score deltas.
 
-```text
-X-variants: feature.EnableA2AServer
-```
+The semantic judge prompt must require structured JSON output and must enforce strict parsing regardless of provider. The Work IQ + `agents\eval-judge\` path already ships with calibration anchors and a "choose the lower score" tie-break; the GitHub Copilot judge prompt template lives in `..\EvaluationCLI\eval-score\node\src\judge-providers.ts` (`buildScoringPrompt`). **Rubric alignment is necessary but not sufficient for cross-provider comparability.** Two different judges scoring against the same rubric will still produce different distributions. Before any mixed-provider conclusions are drawn, the workflow must run a calibration set (described under "Calibration" below) and either (a) restrict comparisons to within-provider pairs (the default the comparator enforces), or (b) apply a provider-specific normalization derived from the calibration set.
 
-So the main issue was not that the CLI was slower than REST. The issues were:
+### Step 6 — semantic rubric
 
-- delegated WorkIQ authentication was not cached at first,
-- device codes expired or belonged to stopped processes,
-- Copilot returned hourly request-limit messages as normal answers,
-- response collection was initially too aggressive for the service limits,
-- retries were not fully automated until later.
-
-Using the WorkIQ REST APIs directly is still the right design because it gives full control over token caching, pacing, retries, raw response capture, and queue resume. However, direct REST calls should not be expected to bypass Copilot/WorkIQ service throttles. If the backend returns per-hour request-limit responses, the runner must back off and resume later.
-
-Required behavior:
-
-- One queue item per dataset, agent, and prompt.
-- Durable per-question checkpointing.
-- Resume without overwriting good answers.
-- Retry blank answers, explicit errors, HTTP 429/503, and known rate-limit text.
-- Treat rate-limit text as invalid even when returned as a normal answer.
-- Use low default concurrency and per-agent pacing.
-- Add adaptive exponential backoff with jitter.
-- Separate response collection from scoring; scoring must fail if any invalid rows remain.
-- Store raw A2A response metadata for troubleshooting.
-- Track latency, retries, rate-limit events, and citation presence.
-
-Recommended architecture:
-
-```text
-batch orchestrator -> response queue -> long-lived WorkIQ runner -> response store
-```
-
-The WorkIQ runner should stay alive across datasets so one delegated auth session can service many response-collection phases.
-
-## Authentication strategy
-
-Use two distinct auth models:
-
-| Need | Recommended auth |
-|---|---|
-| Connector provision/schema/ingestion | App-only Graph auth with `ExternalConnection.ReadWrite.OwnedBy` and `ExternalItem.ReadWrite.OwnedBy`. |
-| Copilot/WorkIQ A2A response collection | Delegated WorkIQ auth, cached securely at user level. |
-
-For WorkIQ:
-
-- Persist MSAL token cache in a secure user-level location, not inside disposable job folders.
-- Do not delete the token cache after each run.
-- Attempt silent token acquisition before starting device code.
-- If device code is required, print and write the active code to a stable file.
-- Keep the same process alive while waiting for auth.
-- If a code expires, rotate to a new code and update the active-code file.
-- If auth fails mid-batch, pause the queue, obtain a new token, and continue from the same question.
-- Assume a 25-dataset batch may require more than one delegated login because token lifetimes and Copilot rate limits may stretch the run across days.
-
-Potential future improvement:
-
-- Investigate whether WorkIQ/A2A supports a sanctioned non-interactive or brokered auth flow. If not, design the operator experience around checkpointed device-code renewals rather than trying to eliminate them entirely.
-
-## Scoring strategy
-
-Every evaluated answer must receive two separate scores:
-
-1. **Deterministic grounding score** - local, repeatable fact/assertion coverage.
-2. **Semantic quality score** - LLM-judged answer quality against the prompt, expected answer, assertions, and supporting facts.
-
-### Deterministic grounding score
-
-Use the deterministic local scorer as the objective grounding signal:
-
-- 80% EvalGen `must_contain` assertion coverage.
-- 20% supporting-fact value coverage.
-- Unicode-normalized, punctuation/spacing-tolerant matching.
-- Whole-word matching where EvalGen marks assertions as whole-word.
-- Explicit no-result detection for expected no-result prompts.
-- Pass/partial/fail status based on assertion coverage.
-
-This score answers: **Did the response contain the required facts?**
-
-### Semantic quality score
-
-Add a required semantic judge stage after deterministic scoring. This score answers: **Was the response actually good, complete, relevant, and faithful?**
-
-The semantic judge should score each response on a 1-5 or 0-100 rubric across:
+The semantic judge in Step 6 scores each response on a 1-5 or 0-100 rubric across:
 
 | Dimension | What the judge checks |
 |---|---|
@@ -337,222 +239,170 @@ The semantic judge should score each response on a 1-5 or 0-100 rubric across:
 | Citation quality | Citations are present and appropriate when expected. |
 | Clarity | The answer is understandable and well structured. |
 
-Default provider order:
+Deterministic and semantic scores stay separate in the report. Do not collapse them into one score unless a later calibration proves the weighting is useful.
 
-1. **M365 Copilot semantic judge through WorkIQ/A2A** - preferred because it keeps scoring in the same Microsoft 365 Copilot environment used for response collection.
-2. **GitHub Copilot semantic judge** - acceptable fallback when an automatable local judging path is available.
-3. **Azure OpenAI judge** - optional fallback only, not the default, because the user does not want this workflow to depend on Azure OpenAI.
+### Calibration
 
-The judge prompt must require structured JSON output, for example:
+Cross-provider judge score distributions differ. Before reporting any GitHub-vs-Work-IQ comparison, run the calibration set:
 
-```json
-{
-  "semanticScore": 0,
-  "relevance": 0,
-  "correctness": 0,
-  "completeness": 0,
-  "groundedness": 0,
-  "citationQuality": 0,
-  "clarity": 0,
-  "passedAssertions": [],
-  "failedAssertions": [],
-  "rationale": ""
-}
-```
+1. Pick one already-completed `provision`-mode job from any dataset.
+2. Run Step 6 twice against the same job's existing response set (skipping response collection, only re-judging): once with `--judge-provider github-copilot`, once with `--judge-provider workiq --judge-agent-id <eval-judge>`.
+3. Compute mean/stddev of each semantic dimension per provider and persist as `calibration/<jobId>.json`.
+4. The comparator reads the calibration file when both inputs to a comparison are absent; if only within-provider pairs are being diffed, calibration is optional and ignored.
 
-The semantic judging stage must be resumable and rate-limit-aware just like response collection. Judge responses that are blank, malformed, rate-limited, or non-JSON must be retried and must block final reporting until resolved.
+Until a dataset has a calibration entry, cross-provider comparisons are reported with raw scores only and a clear `calibrated=false` flag. No claims about "enhanced is x% better" should be published from un-calibrated cross-provider deltas.
 
-Recommended CLI options:
+## Post-hoc comparator (`ccw compare`)
+
+The comparator is the second — and only other — execution path. It is **strictly post-hoc**: it reads two completed `ccw run` job folders, diffs their `06-score/agent-response-scores.json` files, and emits a combined report. It never renders, builds, provisions, ingests, calls Copilot, or touches a tenant.
 
 ```powershell
-node dist\cli.js compare-batch --manifest .\datasets\batch-25.json --semantic-judge m365-copilot
-node dist\cli.js compare-batch --manifest .\datasets\batch-25.json --semantic-judge github-copilot
-node dist\cli.js compare-batch --manifest .\datasets\batch-25.json --semantic-judge azure-openai
+ccw compare --job <enhancedJobId> --job <nonEnhancedJobId> --output <reportDir>
 ```
 
-Reports must keep deterministic and semantic scores separate. Do not collapse them into one score unless a later calibration proves the weighting is useful. The comparison should show:
+Pre-conditions enforced by the comparator:
 
-- deterministic grounding score,
-- semantic quality score,
-- semantic dimension breakdown,
-- assertion pass/fail details,
-- judge rationale,
-- enhanced-vs-RAW delta for both score types.
+- Both jobs ran in `mode=provision` and reached Step 6 with status `done` (`build` jobs and `not-comparable` jobs are rejected).
+- Both jobs ran against the same dataset, identified by the canonical **dataset hash** recorded in `job.json` (see "Canonical hashing" below).
+- Both jobs scored the same eval set, identified by the canonical **eval set hash** recorded in `01-evalgen/`. The supported way to get matching hashes is to pair runs with `--reuse-eval-from <jobId>`; the comparator does not attempt to recover from drift.
+- Exactly one of the two jobs has `noEnhance: true` (the comparator refuses to compare two enhanced or two non-enhanced runs).
+- `judgeProvider` match is **not** a hard precondition. If both jobs share a provider, the report includes semantic deltas. If providers differ, the report sets `semanticComparable: false`, omits the semantic delta, and still includes deterministic, citation, retry, rate-limit, and indexing-readiness side-by-side metrics. A clear annotation directs the operator to either re-run with matching providers or run the calibration set described in Step 6.
 
-Before scaling to 25 datasets, run one calibration on the completed D&B set comparing deterministic scores to semantic quality scores. If the scores diverge materially, report the divergence explicitly; this is expected because deterministic scoring rewards exact fact coverage while semantic scoring can recognize correct paraphrases and answer quality.
+### Canonical hashing
 
-## Reporting
+Hashes must be stable across runs that intentionally match and distinct across runs that intentionally don't. The plan defines two canonical hashes:
 
-Each dataset should produce:
+- **Dataset hash.** SHA-256 over a normalized manifest: `{ sourceFiles: [ { relativePath, sha256, byteLength }, ... ] }` where `sourceFiles` is the sorted list of dataset files filtered by the `--extensions` filter, with `relativePath` normalized to forward slashes and lower-cased on Windows. Generated artifacts under `evalset/`, `workspace/`, and any path starting with `_` are excluded. The dataset description is **not** part of the hash (so a description tweak between runs doesn't break pairing).
+- **Eval set hash.** SHA-256 over the canonicalized eval items: each item reduced to `{ id, prompt, expected_answer, assertions: [...], supporting_facts: [...], category, difficulty }`, sorted by `id`. The raw `eval.evalgen.json` byte stream is **not** the hash — version metadata, generation timestamp, and review markdown are excluded.
 
-- `responses\enhanced\eval.csv`
-- `responses\raw\eval.csv`
-- `responses\actual-responses.json`
-- `scores\agent-response-scoring.md`
-- `scores\agent-response-scores.json`
-- `dataset-summary.json`
-- `dataset-summary.md`
+Both hashes are recorded in `job.json` and the canonical scored report. The comparator computes them lazily from inputs if they are missing, to support older jobs.
 
-The batch should produce:
+### Response variance acknowledgement
 
-- `aggregate-summary.md`
-- `aggregate-summary.json`
-- `score-matrix.csv`
-- `failures-and-retries.md`
+Microsoft 365 Copilot responses are non-deterministic across calls (model temperature, retrieval ordering, indexing freshness, rate-limit-driven retries). A delta between two `provision` runs therefore includes both enhancement effect and response variance. The comparator reports this honestly:
+
+- For pilot datasets, run each pair twice (four jobs total: enhanced-A, enhanced-B, non-enhanced-A, non-enhanced-B) and report per-question score variance alongside per-pair delta so the operator can see when deltas are within noise.
+- For the 25-dataset run, run each pair once and tag the aggregate `aggregate-summary.json` with `repeatTrials: 1` and `varianceAcknowledged: true`. Do not claim "enhanced wins on dataset X" when the delta is below a configurable noise threshold (default 5 points on a 0-100 semantic scale; the threshold should be re-estimated from the pilot variance).
+- The comparator never randomizes / re-orders prompts (eval sets are fixed by hash) but can run pairs roughly contemporaneously to minimize temporal indexing differences.
+
+Outputs under `<reportDir>/`:
+
+- `comparison-report.md` and `comparison-report.json` — per-question delta, per-dimension semantic delta, citation-rate delta, indexing-readiness delta, retry / rate-limit deltas, `comparable?` and `semanticComparable?` flags, and the underlying job hashes.
+- `score-matrix.csv` — one row per question with the deterministic and semantic scores from each job side by side, plus the delta.
+
+### Batch comparison
+
+To produce a batch comparison across the 25 datasets, run the pipeline twice per dataset (once with `--no-enhance --reuse-eval-from <firstJobId>`, once without), then run `ccw compare` once per dataset. An optional `ccw compare-batch --pairs <pairs.json>` driver invokes the comparator across many job pairs and aggregates per-dataset reports into an `aggregate-summary.{md,json}` and a `failures-and-retries.md`. `compare-batch` is a thin post-hoc wrapper — it does not render, build, provision, ingest, or call Copilot, and it never substitutes for `ccw run`.
 
 Aggregate report columns:
 
 | Column | Purpose |
 |---|---|
-| Dataset | Dataset slug/display name. |
-| Enhanced connection / RAW connection | Traceability to Graph connections. |
-| Enhanced agent / RAW agent | Traceability to M365 agent IDs. |
+| Dataset | Dataset slug from `job.json`. |
+| Enhanced job / Non-enhanced job | Job ids for traceability. |
+| Enhanced connection / Non-enhanced connection | Graph connection ids. |
+| Enhanced agent / Non-enhanced agent | M365 agent ids. |
 | Question count | Actual comparable prompt count. |
 | Enhanced deterministic score | Local fact/assertion grounding score. |
-| RAW deterministic score | Local fact/assertion grounding score. |
-| Deterministic delta | Enhanced minus RAW deterministic score. |
+| Non-enhanced deterministic score | Local fact/assertion grounding score. |
+| Deterministic delta | Enhanced minus non-enhanced. |
 | Enhanced semantic score | LLM-judged answer quality score. |
-| RAW semantic score | LLM-judged answer quality score. |
-| Semantic delta | Enhanced minus RAW semantic score. |
+| Non-enhanced semantic score | LLM-judged answer quality score. |
+| Semantic delta | Enhanced minus non-enhanced. |
 | Semantic dimensions | Relevance, correctness, completeness, groundedness, citation quality, and clarity. |
-| Pass/partial/fail | Quality breakdown per agent. |
-| Citation rate | Answers with citations per agent. |
+| Pass/partial/fail | Quality breakdown per job. |
+| Citation rate | Answers with citations per job. |
 | Retry count | Operational reliability signal. |
 | Rate-limit count | Copilot throttling signal. |
 | Indexing readiness time | Time from ingest completion to canary success. |
-| Comparable? | Exclude invalid datasets from aggregate winner calculations. |
+| Judge provider | `github-copilot` or `workiq`. Both jobs in the pair must match (see comparator pre-conditions). |
+| Comparable? | Excludes pairs where either job failed indexing, had invalid responses, used different judge providers, or had too few valid questions. |
 
-Do not produce aggregate claims for datasets where either connector failed to index, had invalid responses, or had too few valid questions.
+Do not produce aggregate claims for pairs where `comparable?` is false.
 
-## Implementation phases
+Before scaling to 25 datasets, run one calibration pass on the completed D&B pair comparing deterministic scores to semantic quality scores. If the scores diverge materially, report the divergence explicitly; this is expected because deterministic scoring rewards exact fact coverage while semantic scoring can recognize correct paraphrases and answer quality.
 
-### Phase 0: Stabilize known failures
+## Authentication
 
-Owner: `C:\Users\bodonnell\src\CopilotConnectorSkill`
+Three distinct auth models, one of which is conditional on the judge provider:
 
-Deliverables:
+| Need | Auth |
+|---|---|
+| Connector provision / schema / ingestion (Steps 4 and the generated connector's runtime) | App-only Graph auth with `ExternalConnection.ReadWrite.OwnedBy` and `ExternalItem.ReadWrite.OwnedBy`. |
+| Copilot response collection — every Step 6 | Delegated Work IQ auth (`WorkIQAgent.Ask` scope) acquired via the device-code flow against the Azure PowerShell public client (`14d82eec-204b-4c2f-b7e8-296a70dab67e`). Required regardless of judge provider because the candidate is always an M365 Copilot declarative agent reached over Work IQ A2A. |
+| Semantic judge — Step 6, default | GitHub Copilot CLI session: the `copilot` binary on the PATH, signed in to a GitHub account with Copilot enabled. No tenant credentials are consumed by the judge in this mode. |
+| Semantic judge — Step 6, alternative | Same delegated Work IQ token used for response collection, plus the `agents\eval-judge\` declarative agent published in the tenant and discovered through `https://workiq.svc.cloud.microsoft/a2a/.agents`. |
 
-- Skill guidance and sample updates for deterministic connector generation.
-- Skill sample updates for current M365 Copilot declarative-agent package format.
-- Regression tests/examples for dataset normalization and schema hardening.
-- Connector template examples for CSV, JSON array, JSONL-as-`.json`, nested JSON, and sparse records.
-- Tests/examples that normal enhanced ingestion always uses the enhancer, and optional RAW-baseline ingestion never uses the enhancer when that pattern is explicitly requested.
-- Current declarative agent manifest template pinned and validated in the skill sample.
-- Graph schema validation guidance that runs before any tenant write.
-- Deprovision guidance tested for both connector and agent cleanup.
+For Work IQ:
 
-Exit criteria:
+- Persist the MSAL token cache in a secure user-level location, not inside disposable job folders.
+- Do not delete the token cache after each run.
+- Attempt silent token acquisition before starting device code.
+- If device code is required, print and write the active code to a stable file.
+- Keep the runner alive while waiting for auth; if a code expires, rotate to a new code and update the active-code file.
+- If auth fails mid-run, pause the queue, obtain a new token, and continue from the same question.
+- A 25-dataset comparison run almost certainly needs more than one delegated login because token lifetimes and Copilot rate limits will stretch the run across days.
 
-- The skill reliably directs GitHub Copilot CLI to generate generic enhanced connector/agent artifacts without manual refactoring.
-- When the prompt explicitly requests a comparison workflow, a dry-run in the workflow repo can render enhanced and RAW connector/agent artifacts for representative datasets using the updated skill guidance.
+`scripts\setup-a2a.ps1` already provisions the Work IQ first-party SP, runs the device-code flow, and emits a token + agents file for `eval-score`; this should be folded into Step 6's prelude rather than left as a manual one-shot.
 
-### Phase 1: Dual connector and agent automation
+If the Work IQ token expires mid-run after the GitHub Copilot judge has already started returning scores, response collection (which still needs Work IQ) stalls but judging does not — Step 6 pauses response collection, refreshes the token via the device-code flow, and resumes from the last checkpoint. The GitHub Copilot judge keeps running independently, so the cost of an auth refresh is one paused response-collection batch, not a re-judge.
 
-Owner: split between `CopilotConnectorSkill` and `CopilotConnectorWorkflow`.
+## Connector lifecycle and collisions
 
-Deliverables:
+The 25-dataset pair run produces up to 50 connectors and 50 declarative agents in one tenant. Two interlocking problems must be handled:
 
-- `compare-dataset` CLI command.
-- Deterministic naming for connections, app packages, and agents.
-- Automatic enhanced connector provisioning and ingestion from skill-generated artifacts.
-- Automatic RAW connector provisioning and ingestion from skill-generated artifacts when comparison mode requests the optional RAW recipe.
-- Automatic enhanced and RAW agent package rendering from skill-generated templates when comparison mode requests paired agents.
-- Workflow-side validation, install, and agent ID discovery.
-- Run database with connector and agent state.
+- **Re-run collisions.** Re-running a dataset with the same `connectorId` against a tenant that already has that connection / schema / agent must not silently corrupt or partially overwrite the prior state. The workflow exposes:
+  - `--reuse-existing` (default): if `GET /external/connections/<connectorId>` returns 200, reuse it and skip provision; re-register schema only if its hash changed; re-ingest only changed items; reuse the published agent id from `workspace\jobs\<priorJobId>\05-deploy\agent.json` if present.
+  - `--replace`: deprovision the existing connection + items, uninstall the existing agent, then provision fresh. Refuses to run without an explicit confirmation flag (`--yes`) in non-interactive contexts.
+  - `--fail-on-conflict`: hard-fail Step 5 if a same-id connection exists. Useful in CI.
+- **Cleanup after a batch.** A batch produces a manifest of every resource it created: `workspace\jobs\<jobId>\05-deploy\resources.json` per job, aggregated into `workspace\compare-runs\<batchId>\resources.json`. A `ccw deprovision --batch <batchId>` command iterates that manifest and removes connections, schemas, items, and agents in reverse order, with a dry-run mode that prints what would be deleted. Operators should run `ccw deprovision` after every 25-dataset pair run.
 
-Exit criteria:
+Naming is deterministic from `connectorId` + the `noEnhance` flag:
 
-- One dataset can be provisioned end-to-end without manual connector/agent edits, and any generic artifact defect is fixed in `CopilotConnectorSkill`, not patched ad hoc in the generated job folder. Comparison-specific orchestration remains in `CopilotConnectorWorkflow`.
+- Enhanced: connection id = `<connectorId>`, agent app id = `<connectorId>-agent`, agent display name = `<connectorName> Assistant`.
+- Non-enhanced: connection id = `<connectorId>-raw`, agent app id = `<connectorId>-raw-agent`, agent display name = `<connectorName> RAW Assistant`.
 
-### Phase 2: EvalGen, WorkIQ response runner, and local scorer
+Re-running the same dataset always lands on the same ids, so `--reuse-existing` is the default and is safe.
 
-Owner: primarily `CopilotConnectorWorkflow`, with optional `EvaluationCLI` changes if wrapping EvalGen is not enough.
+## Run state and reporting
 
-Deliverables:
+Per job (under `workspace\jobs\<jobId>\`):
 
-- Automated 100-question EvalGen multi-batch generation and merge.
-- Indexing readiness canary gate.
-- Long-lived WorkIQ REST/A2A response runner with durable token cache.
-- Resumable per-question queue with adaptive backoff.
-- Local deterministic scorer integrated as the grounding metric.
-- Required semantic quality judge integrated with pluggable providers.
-- Invalid-response gate before scoring.
-- Invalid or malformed semantic-judge output blocks final reporting.
+- `job.json` — config + dataset hash + per-step status.
+- `01-evalgen\` through `06-score\` — per-step inputs, outputs, and `step.log` / `step-status.json`.
+- `06-score\agent-response-scores.{json,md}` — canonical per-job scored report.
+- `06-score\eval-score-results.json` — raw `eval-score` output for troubleshooting.
 
-EvaluationCLI change decision:
+Per comparison (under `<reportDir>/`):
 
-- If EvalGen can remain capped at 50 and still emits stable `eval.csv` plus `eval.evalgen.json`, keep multi-batch orchestration in `CopilotConnectorWorkflow`.
-- If 25 datasets expose repeated EvalGen merge/dedup issues, add first-class `--target-count`, `--avoid-evalsets`, and near-duplicate reporting support in `C:\Users\bodonnell\src\EvaluationCLI`.
+- `comparison-report.{md,json}` — per-question + per-dimension delta.
+- `score-matrix.csv` — side-by-side question rows.
 
-Exit criteria:
+When `compare-batch` is used:
 
-- One dataset can complete enhanced-vs-RAW response collection and scoring with no manual CSV/script edits.
+- `aggregate-summary.{md,json}` — per-dataset summary across all comparison pairs.
+- `failures-and-retries.md` — operational triage.
 
-### Phase 3: Batch runner for 25 datasets
+A SQLite run-state layer should back these JSON artifacts so cross-job queries, resume logic, and rate-limit / retry analytics don't require re-parsing every `step-status.json`. Tables:
 
-Owner: `C:\Users\bodonnell\src\CopilotConnectorWorkflow`
+| Table | Purpose |
+|---|---|
+| `jobs` | One row per `ccw run` — dataset slug + hash, `noEnhance` flag, `judgeProvider`, step statuses, timings. |
+| `connectors` | Graph connection id, schema status, item count per job. |
+| `agents` | Deployed agent id and binding to its job. |
+| `questions` | EvalGen questions per job — category, expected answer, assertions, source mapping. |
+| `responses` | Per-question actual answer, citations, raw response metadata, retry state. |
+| `scores` | Per-question deterministic + semantic scores per job. |
+| `comparisons` | Pair of job ids, comparator config, output report path, per-dataset summary. |
+| `events` | Auditable log of state transitions, auth events, rate-limit events, retries. |
 
-Deliverables:
+## Repository ownership
 
-- `compare-batch` CLI command.
-- Batch manifest support.
-- Resume/retry across process restarts.
-- Per-dataset and aggregate reports.
-- Cost/time estimate printed before starting a full batch.
-- `--dry-run` mode that exercises all local steps without Graph writes or Copilot calls.
-
-Exit criteria:
-
-- A 2-3 dataset pilot batch completes unattended except for expected WorkIQ re-auth prompts.
-
-### Phase 4: Operational hardening
-
-Deliverables:
-
-- Dashboard or report viewer for batch state.
-- Failure triage report.
-- Cleanup/deprovision tooling.
-- Required semantic quality score and semantic dimension breakdown.
-- Documentation for operator workflow and auth renewal.
-
-Exit criteria:
-
-- 25-dataset run can be launched, monitored, resumed, and reported from documented commands.
-
-## Recommended command flow
-
-Pilot one dataset:
-
-```powershell
-npm run build
-node dist\cli.js compare-dataset --config .\datasets\dnb.compare.json --dry-run
-node dist\cli.js compare-dataset --config .\datasets\dnb.compare.json --confirm
-```
-
-Pilot a small batch:
-
-```powershell
-node dist\cli.js compare-batch --manifest .\datasets\pilot-3.json --dry-run
-node dist\cli.js compare-batch --manifest .\datasets\pilot-3.json --confirm --resume
-```
-
-Full 25-dataset batch:
-
-```powershell
-node dist\cli.js compare-batch --manifest .\datasets\batch-25.json --confirm --resume
-```
-
-Resume only response collection:
-
-```powershell
-node dist\cli.js compare-batch --manifest .\datasets\batch-25.json --start-at responses --resume
-```
-
-Generate aggregate reports from existing state:
-
-```powershell
-node dist\cli.js compare-batch --manifest .\datasets\batch-25.json --report-only
-```
+| Repository | Owns | Required changes |
+|---|---|---|
+| `C:\Users\bodonnell\src\CopilotConnectorSkill` | Generic connector and agent artifact guidance / templates used by GitHub Copilot CLI. | Keep the skill **generic**. Document an optional "no-enhance shape-inferred connector" recipe so a user prompting GitHub Copilot CLI directly can ask for a non-enhanced build. Do not bake comparison behaviour into the skill — the workflow's `--no-enhance` flag is what drives the second of the two runs that feed the comparator. |
+| `C:\Users\bodonnell\src\CopilotConnectorWorkflow` | The six-step pipeline (`ccw run`), the post-hoc comparator (`ccw compare` / `ccw compare-batch`), run state, reporting. | Owns everything described in the pipeline and comparator sections above. |
+| `C:\Users\bodonnell\src\EvaluationCLI` | EvalGen and `eval-score`. | `eval-score` is the only scorer the workflow calls. Native `--target-count` / `--avoid-evalsets` / near-duplicate handling in EvalGen are nice-to-haves; the workflow wraps current EvalGen first and only escalates if the wrapping proves brittle. |
 
 ## Opus 4.7 cross-reference
 
@@ -569,6 +419,39 @@ This plan was reviewed against Opus 4.7. The review confirmed the overall direct
 9. Add regression tests for each schema/template failure encountered during the D&B run.
 10. Consider SQLite run state, a long-lived WorkIQ runner, dry-run mode, pinned manifest schema validation, and cost/time estimates before launching a 25-dataset run.
 
+## GPT-5.5 cross-reference
+
+This plan was also reviewed against GPT-5.5 after the single-pipeline rewrite. GPT-5.5 identified the following findings, all of which were adopted in the sections above unless noted otherwise.
+
+**Must-fix (adopted):**
+
+1. The six-step model was missing the actual tenant-side lifecycle that Step 6 depends on. Step 5 in this plan and `src/steps/step5-deploy.ts` both only emit deploy artifacts. Step 5 has been expanded to run provision → schema register + poll → ingest + verify count → app package validate → agent install/publish → agent id discover under `05-deploy/` in `provision` mode. `build`-mode jobs are now explicitly marked not-comparable.
+2. "Step 6 runs on every `ccw run`" contradicted `build` mode. Step 6 is now scoped to `provision`-mode jobs only, with a `requires-provision-mode` diagnostic on `build` jobs and a hard refusal by the comparator to read them.
+3. Two independent `ccw run` invocations were not guaranteed to share the same eval set or canary set. Added `--reuse-eval-from <jobId>` (and `--eval-set <path>`) and the explicit two-step "Pairing two runs" recipe. `evalSetHash` is computed canonically and must match.
+4. No-enhance "1:1 source columns" conflicted with Graph's `^[A-Za-z][A-Za-z0-9_]{0,31}$` property-name constraint and Step 3 sanitization. Step 2 now sanitizes column names to Graph-valid form, records a `sourceFieldMappings` table on `schema-suggestion.json`, and emits item properties keyed by the sanitized names so Step 3 never has to drop columns silently.
+5. Current `eval-score` does not fail-closed: empty answers and judge errors are silently scored as 0 (`EvaluationCLI/eval-score/node/src/scorer.ts:49-108`). Added an explicit Step 6 sub-stage (`Invalid-row gate / normalization wrapper`) that reads `eval-score` output, treats blank / `[ERROR:]` / fallback-provider / malformed-judge rows as invalid, retries them, and fails the job if any remain. The same wrapper produces the canonical `agent-response-scores.json` rather than expecting `eval-score` to emit it directly.
+6. The canonical scored-report shape was not aligned with what `eval-score` writes today. The normalization wrapper above is now explicitly the producer of `06-score/agent-response-scores.json`.
+
+**Should-fix (adopted):**
+
+7. Type-inference preserve rules were too narrow. Broadened the preserve-as-String list to cover `id` / `code` / `key` / `no` / `num` / `iso` / `zip` / `postal` / `phone` / `fax` / `npi` / `duns` / `taxonomy` / `account` suffixes, leading-zero values, scientific notation, and integers beyond JS safe range — at least as broad as the enhancer's existing `PRESERVE_NUMERIC_*` rules. The default for any CSV/TSV column is now `String` unless **every** non-empty row parses as numeric or DateTime *and* no preserve heuristic matches.
+8. Nested JSON handling was under-specified. The no-enhance branch now deterministically flattens nested objects (dotted paths), comma-joins arrays of scalars, and stringifies arrays of objects as compact JSON. This is identity-compatible (no semantic enrichment) but produces Graph-valid items. Without it, JSON datasets would fail Step 3 validation.
+9. Fallback `title` / `url` / `iconUrl` could bias the comparison. Added a `metadataProvenance` block to the canonical report so the comparator can attribute deltas to "no source title column" vs. "answer-quality loss".
+10. Hard refusal of mismatched-judge pairs was softened. The comparator now sets `semanticComparable: false`, omits the semantic delta, and still reports deterministic and operational metrics for cross-provider pairs.
+11. Hashing needed a canonical definition. Added the "Canonical hashing" section with explicit input shape for `datasetHash` and `evalSetHash` so generated artifacts under `evalset/` / `workspace/` and irrelevant metadata can't cause false mismatches or false matches.
+12. Response variance was not acknowledged. Added the "Response variance acknowledgement" section: pilot datasets run paired-twice for variance estimation; the 25-dataset run reports per-pair delta against a configurable noise threshold and never claims a win when the delta is below noise.
+13. GitHub Copilot CLI judge may be fragile for unattended runs. Added an explicit judge preflight as Step 6 sub-stage (1), and reframed the default/alternative table to recommend `workiq` for long unattended / headless CI runs even though `github-copilot` remains the in-process default.
+14. Rubric alignment is not the same as score comparability. Added the "Calibration" sub-section and the `ccw calibrate` driver. Cross-provider deltas are reported with `calibrated=false` until a calibration entry exists; rubric alignment is necessary but no longer claimed as sufficient.
+15. Implementation order had unsafe dependencies (deleting `src/raw-connector.ts` before `compare-executor.ts` was removed would break the build). Order rewritten end-to-end: the no-enhance Step 2 and the new Step 6 driver land first, the post-hoc comparator lands eighth, and the entire old compare path (`src/compare.ts` + `src/compare-executor.ts` + `src/raw-connector.ts` + old CLI handlers) is deleted in a single ninth change. Gates and preflight ship with the Step 6 driver, not after.
+
+**Nice-to-have (adopted):**
+
+16. The plan's execution model said "two execution paths" but later referenced `ccw compare-batch`. The "Batch comparison" subsection now makes `compare-batch` explicitly a thin post-hoc wrapper around `ccw compare` with no orchestrator behaviour.
+17. Connector id collision and 25-dataset cleanup were unaddressed. Added the "Connector lifecycle and collisions" section: `--reuse-existing` (default), `--replace`, `--fail-on-conflict`, deterministic naming, and a `ccw deprovision --batch <id>` command backed by per-job `resources.json` manifests.
+18. Updated the small fact about `eval-score`'s built-in default: `EvaluationCLI/eval-score`'s CLI default judge provider is currently `workiq`, not `github-copilot`. The Step 6 wrapper explicitly passes `--judge-provider github-copilot` when that is the workflow's default; the plan no longer implies eval-score already matches.
+
+**Set aside, with reasoning:** none. All 18 findings landed in the plan in some form.
+
 ## Immediate next implementation tasks
 
 ### Current implementation status
@@ -576,20 +459,40 @@ This plan was reviewed against Opus 4.7. The review confirmed the overall direct
 | Item | Status | Notes |
 |---|---|---|
 | Connector skill deterministic guidance | Implemented | Added deterministic generation contract plus detailed reference. |
-| Optional RAW-baseline skill recipe | Implemented | Added as explicit prompt/workflow-triggered recipe, not default behavior. |
 | Installed Copilot Connector Skill sync | Implemented | Source repo includes `install.ps1`; installed skill was updated from source. |
-| Workflow compare state contract | Implemented | `compare-dataset` and `compare-batch` write `compare-state.json` in dry-run/planning mode. |
-| Full compare execution | Not started | Provisioning, agent deployment, indexing readiness, response collection, and scoring still need implementation behind the compare state machine. |
+| Single-pipeline `--no-enhance` flag on `ccw run` | Not started | Today the only way to produce a non-enhanced connector is the parallel `compare-dataset` / `compare-batch` path. `src/cli.ts::buildConfigFromFlags` and `src/types.ts::JobConfig` do not yet expose a `noEnhance` (or equivalent) boolean. |
+| Step 2 identity branch that infers schema from source shape | Not started | The intended behavior is: when `--no-enhance` is set, Step 2 still walks the source rows, infers field types and the column list, writes a Graph-shaped `schema-suggestion.json` reflecting those columns (with deterministic `title`/`url`/`iconUrl` fallbacks), and emits one external item per source record whose `properties` are the source columns 1:1 — *not* a fixed `rawJson`/`rawText` catch-all schema. Steps 3–6 then run unchanged. |
+| Step 6 = `eval-score` only (GitHub Copilot judge default, Work IQ judge alternative) | Not started | Scoring should run on every `ccw run` via `..\EvaluationCLI\eval-score`. Default judge is `--judge-provider github-copilot` (runs locally through the `copilot` CLI). Supported alternative is `--judge-provider workiq --judge-agent-id <agents\eval-judge\ agent id>` for operators without GitHub Copilot CLI or wanting to keep judging inside M365 Copilot. Response collection is always over Work IQ A2A regardless of judge. Today Step 6 is `@microsoft/m365-copilot-eval` (`src/steps/step6-m365eval.ts`), and the alternate deterministic scorer lives in `src/scoring.ts` reachable only from `compare-executor.ts`. |
+| Remove `@microsoft/m365-copilot-eval` | Not started | Delete `src/steps/step6-m365eval.ts`, the `runM365Eval` / `m365Eval` config surface in `src/types.ts`, the `--run-m365-eval` / `--m365-*` CLI flags in `src/cli.ts`, the GUI fields in `public/`, the M365 EvalGen converter path in `src/tools.ts`, the EULA-accept hop in `src/auth-preflight.ts`, and all "Step 6 — `@microsoft/m365-copilot-eval`" prose in `README.md`. The Node ≥ 22.21.1 requirement (`src/tools.ts::M365_EVAL_MIN_NODE`) goes away with it. |
+| Post-hoc comparator (`ccw compare --job <a> --job <b>`) | Not started | Replaces `compare-dataset` / `compare-batch`. Reads the canonical scored report from each job's `06-score/` folder, emits an enhanced-vs-non-enhanced delta report, refuses mismatched `judgeProvider` pairs, and never renders/builds/provisions/ingests/calls Copilot. |
+| Retire parallel `compare-dataset` / `compare-batch` execution | Not started | `src/compare.ts`, `src/compare-executor.ts`, and `src/raw-connector.ts` need to be deleted or reduced: any inference logic worth keeping (e.g. shape-derived items) belongs in Step 2's no-enhance branch, not in a parallel RAW renderer. |
+| Current Copilot declarative agent + manifest format | Implemented | `src/steps/step4-connector.ts:85-127` programmatically emits the agent against `copilot/declarative-agent/v1.0/schema.json` and the Teams manifest against `teams/v1.23/MicrosoftTeams.schema.json`. |
+| In-process target-count eval set builder | Implemented | `src/evalset-builder.ts` reads any seed `eval.evalgen.json`, deterministically materializes additional items from source records up to the target count, deduplicates by prompt and id, and writes `eval.csv`, `eval.evalgen.json`, and `eval-review.md`. |
+| EvalGen multi-batch (`--avoid-evalsets`) generation + near-duplicate detection | Not started | The builder above does not yet call EvaluationCLI `eval-gen` in a multi-batch loop; LLM-generated prompts past the seed are still single-shot. |
+| Indexing-readiness canary gate | Not started | No canary prompts or `indexReadyAt` persistence exists. Belongs as a sub-step of Step 6 (before scoring kicks off). |
+| `eval-score` integration as Step 6 | Not started | Today `eval-score` is invoked by hand or via `scripts\setup-a2a.ps1`. It needs to become an in-process Step 6 driver that: (a) waits on the canary gate, (b) calls `eval-score --m365-agent-id <candidate>` with `--judge-provider github-copilot` by default or `--judge-provider workiq --judge-agent-id <eval-judge>` when the operator opted into the alternative, (c) writes the canonical scored report into `06-score/` tagged with the `judgeProvider` that produced it. |
+| Deterministic grounding score | Implemented but mis-located | `src/scoring.ts::scoreResponseSet` correctly produces the deterministic 80/20 grounding score, citation flag, no-result detection, and per-category averages — but it is only reachable from `compare-executor.ts`. It needs to move into Step 6 alongside `eval-score`'s semantic score, so every `ccw run` emits both. |
+| Invalid-response gate before scoring | Not started | Scoring runs whenever both response CSVs exist; rate-limit / blank detection is not enforced. |
+| Aggregate / comparison report | Not started | After `ccw compare` exists, it should emit `comparison-report.{md,json}` with per-question delta, per-dimension semantic delta, citation-rate delta, retry counts, and a `comparable?` flag that excludes datasets where either job failed indexing or had invalid responses. |
+| SQLite run database | Not started | All state still lives in JSON (`job.json`, per-step `step-status.json`). |
+| WorkIQ durable token cache (this repo) | Partial | `src/auth-preflight.ts` seeds Work IQ MCP tokens and EvalScore A2A device-code tokens before a run, and `scripts\setup-a2a.ps1` persists a delegated `WorkIQAgent.Ask` token + refresh token to disk. A workflow-owned cache outside individual job folders is not yet a first-class feature. |
 | EvaluationCLI native changes | Deferred | Workflow wraps current EvalGen first; EvaluationCLI changes only if target-count/dedup wrapping proves brittle. |
 
-1. Implement full execution for `compare-dataset` and `compare-batch` from the new compare state contract.
-2. Add a SQLite run-state layer for datasets, connectors, agents, questions, responses, and scores.
-3. Promote the D&B custom RAW connector generator into an optional comparison-mode Step 4 output, not the default connector output.
-4. Replace the current agent manifest template with a pinned current Copilot declarative-agent template and validator test.
-5. Move the 100-question EvalGen merge logic into TypeScript workflow code.
-6. Move the Python WorkIQ collector/scorer logic into reusable workflow modules or package them as maintained scripts invoked by the CLI.
-7. Add durable WorkIQ token cache and active-device-code behavior outside individual job folders.
-8. Add indexing canary prompts and readiness checks.
-9. Add invalid-response gating before scoring.
-10. Add semantic quality judging with M365 Copilot as the preferred provider and GitHub Copilot/Azure OpenAI as fallbacks.
-11. Build aggregate reporting and pilot with 2-3 datasets before running all 25.
+### Implementation order
+
+The order below is dependency-safe: nothing is deleted before its successor exists, and gates are added *before* the Step 6 driver that depends on them.
+
+1. **Plumb the new shape into types and CLI.** Add `JobConfig.noEnhance: boolean`, `JobConfig.reuseEvalFromJobId?: string`, `JobConfig.evalSetPath?: string`, `JobConfig.judgeProvider: 'github-copilot' | 'workiq'`, `JobConfig.judgeAgentId?: string`. Wire matching flags into `src/cli.ts` and the GUI in `public/`. No behavior change yet — the flags are accepted and ignored.
+2. **Implement the canonical hash helpers** (`datasetHash`, `evalSetHash`) and start recording them in `job.json`. Backfill existing jobs lazily on read so the post-hoc comparator can later operate on them.
+3. **Step 2 identity branch (`--no-enhance`).** Implement the type inference rules, the Graph-safe name sanitization with `sourceFieldMappings`, the deterministic nested-JSON handling, and the title/url/iconUrl provenance flags. Add unit tests for: leading-zero identifiers, >53-bit integers, nested JSON, sparse rows, colliding sanitized names, and a missing-title-column fallback. **Do not** delete `src/raw-connector.ts` yet — it is still imported by `src/compare-executor.ts`.
+4. **Eval-set reuse.** Implement `--reuse-eval-from <jobId>` and `--eval-set <path>` in Step 1. Step 1 copies the source eval set verbatim (including `eval.csv`, `eval.evalgen.json`, `eval-review.md`, and any canary file) and recomputes the eval-set hash to confirm it matches the source job. Add tests that pair two `ccw run` jobs and assert identical `evalSetHash`.
+5. **Expand Step 5 to the tenant-side lifecycle.** Add the provision/ingest/publish/discover substeps under `05-deploy/`, with idempotent `--reuse-existing` semantics and persisted `resources.json` per job. Keep `mode=build` as artifact-only with an explicit `requires-provision-mode` diagnostic so downstream Step 6 has a clean signal to skip.
+6. **Step 6 driver.** Add the indexing-readiness canary gate, judge preflight, `eval-score` invocation with `--judge-provider github-copilot` default and `--judge-provider workiq --judge-agent-id <id>` alternative, the invalid-row gating + normalization wrapper, and the deterministic-scorer fold-in. Emit the canonical `06-score/agent-response-scores.json` with `judgeProvider`, `judgeModel`, `datasetHash`, `evalSetHash`, and `metadataProvenance` populated. Gates and preflight ship together with the driver — no half-step where the driver exists without invalid-row protection.
+7. **Remove `@microsoft/m365-copilot-eval`.** Delete `src/steps/step6-m365eval.ts`, the `runM365Eval` / `m365Eval` config surface, the `--run-m365-eval` / `--m365-*` CLI flags, the GUI fields, the M365 EvalGen converter path in `src/tools.ts`, the EULA-accept hop in `src/auth-preflight.ts`, the `M365_EVAL_MIN_NODE` constant, and all related prose. The new Step 6 from task 6 is now the only Step 6.
+8. **Post-hoc comparator.** Implement `ccw compare --job <a> --job <b>` reading `06-score/agent-response-scores.json` from each job, applying the pre-conditions (modes, dataset hash, eval-set hash, `noEnhance` complement), and emitting `comparison-report.{md,json}` + `score-matrix.csv`. Soft-degrade to deterministic-only output when `judgeProvider` differs (do not hard-refuse).
+9. **Delete the obsolete compare path in one change.** Remove `src/compare.ts`, `src/compare-executor.ts`, `src/raw-connector.ts`, the `compare-runs/` workspace conventions, and the old `compare-dataset` / `compare-batch` CLI handlers. This must follow task 8 because tasks 3-8 depend on `src/raw-connector.ts` continuing to exist while the new code paths are being built. Add `ccw compare-batch --pairs <pairs.json>` in its post-hoc-only form alongside this deletion.
+10. **EvalGen multi-batch loop.** Add the `--avoid-evalsets` / target-count / near-duplicate loop inside `src/evalset-builder.ts` for datasets where the deterministic builder cannot reach the prompt target.
+11. **Connector lifecycle tooling.** Implement `--replace`, `--fail-on-conflict`, and `ccw deprovision --batch <batchId>` against the `resources.json` manifests written in task 5. Required before the full 25-dataset run; not strictly required to ship the pilot.
+12. **SQLite run-state layer.** Migrate jobs, items, responses, scores, comparisons, and events to SQLite while preserving the JSON artifacts as the source-of-truth on disk. Largely a query-performance / resume-logic improvement; not a behavioral change.
+13. **Calibration set.** Add the `ccw calibrate --job <id>` driver that re-runs Step 6 against an existing job's response set with both providers and writes `calibration/<jobId>.json`. Required before any published cross-provider claim.
+14. **Aggregate report and pilot.** Build the aggregate / comparison report and run the 2-3 dataset pilot, including the variance-control double-run for at least one pilot dataset, before kicking off the 25-dataset batch.

@@ -26,8 +26,6 @@ export interface AuthPreflightOptions {
   runGraph?: boolean;
   runWorkIq?: boolean;
   runEvalScoreA2A?: boolean;
-  runM365EvalEula?: boolean;
-  m365EvalPackageVersion?: string;
   tools?: ToolPaths;
 }
 
@@ -62,12 +60,6 @@ export async function runAuthPreflight(
     checks.push(await evalScoreA2AMsalCheck(options, tools, emitter));
   } else {
     checks.push({ name: 'EvalScore A2A MSAL auth', status: 'skipped', message: 'Not requested' });
-  }
-
-  if (options.runM365EvalEula) {
-    checks.push(await m365EvalEulaCheck(options, emitter));
-  } else {
-    checks.push({ name: 'm365-copilot-eval EULA', status: 'skipped', message: 'Not requested' });
   }
 
   const executed = checks.some((check) => check.status !== 'skipped');
@@ -266,23 +258,6 @@ provider.getToken(false).then(() => console.error('EvalScore MSAL A2A token acqu
     message: result.ok
       ? 'EvalScore MSAL A2A token cache is ready.'
       : `EvalScore MSAL A2A preflight exited ${result.exitCode}. Build eval-score and verify EVALSCORE_A2A_* settings.`,
-  };
-}
-
-async function m365EvalEulaCheck(options: AuthPreflightOptions, emitter?: EventEmitter): Promise<AuthPreflightCheck> {
-  const pkgRef = `@microsoft/m365-copilot-eval@${options.m365EvalPackageVersion || 'latest'}`;
-  const result = await runProcess({
-    cmd: 'npx',
-    args: ['-y', pkgRef, 'accept-eula'],
-    env: sanitizedChildEnv(options.clientSecretEnvVar),
-    emitter,
-    label: 'm365eval-eula',
-    shell: true,
-  });
-  return {
-    name: 'm365-copilot-eval EULA',
-    status: result.ok ? 'passed' : 'failed',
-    message: result.ok ? 'EULA accepted or already accepted.' : `accept-eula exited ${result.exitCode}.`,
   };
 }
 

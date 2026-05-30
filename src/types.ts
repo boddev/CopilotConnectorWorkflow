@@ -1,4 +1,4 @@
-export type StepName = 'evalgen' | 'enhance' | 'schema' | 'connector' | 'deploy' | 'm365eval';
+export type StepName = 'evalgen' | 'enhance' | 'schema' | 'connector' | 'deploy' | 'score';
 
 export type StepStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped';
 
@@ -8,10 +8,6 @@ export type RunMode = 'build' | 'provision';
 
 export type DeployTarget = 'azure-functions' | 'azure-container-apps' | 'both';
 
-export type M365Evaluator =
-  | 'Relevance' | 'Coherence' | 'Groundedness' | 'ToolCallAccuracy'
-  | 'Citations' | 'ExactMatch' | 'PartialMatch';
-
 export interface AuthConfig {
   tenantId?: string;
   clientId?: string;
@@ -20,24 +16,69 @@ export interface AuthConfig {
   useManagedIdentity?: boolean;
 }
 
-/** Configuration for the optional Step 6 (@microsoft/m365-copilot-eval). */
-export interface M365EvalConfig {
-  /** M365 agent ID — required by @microsoft/m365-copilot-eval. Note: this is an AGENT id, not the connector id. */
-  agentId?: string;
-  /** Optional path to a system prompt markdown file folded into every prompt. */
-  systemPromptFile?: string;
-  /** Evaluators to enable. Default: Relevance, Coherence, Groundedness, Citations. */
-  evaluators?: M365Evaluator[];
-  /** Concurrency for runevals. Default 1. */
-  concurrency?: number;
-  /** Environment passed to runevals --env. Default 'local'. */
-  environment?: string;
-  /** Package version pinned via npx. Default 'latest'. */
-  packageVersion?: string;
-  /** runevals --log-level. Default 'info'. */
-  logLevel?: 'debug' | 'info' | 'warning' | 'error';
-  /** If true, runs `runevals accept-eula` before the eval. Required on first use. */
-  acceptEula?: boolean;
+export type JudgeProvider = 'github-copilot' | 'workiq';
+
+export interface ScoreConfig {
+  /** Judge provider. Defaults to 'github-copilot'. */
+  judgeProvider?: JudgeProvider;
+  /** Required when judgeProvider is 'workiq'. The eval-judge declarative agent id. */
+  judgeAgentId?: string;
+  /** M365 candidate agent id (the agent under evaluation). Required in provision mode. Discovered/persisted by Step 5; can be supplied here for an existing agent. */
+  candidateAgentId?: string;
+  /** Minimum wait floor (seconds) for indexing readiness gate. Default 300 (5 min). */
+  indexReadyMinSeconds?: number;
+  /** Maximum wait ceiling (seconds) for indexing readiness gate. Default 5400 (90 min). */
+  indexReadyMaxSeconds?: number;
+  /** Max retries per invalid response row before failing the job. Default 3. */
+  invalidRowRetryLimit?: number;
+  /** If true, Step 5 will NOT try to auto-publish the agent via `atk install`; operator must provide candidateAgentId out-of-band. */
+  skipAgentPublish?: boolean;
+  /** Comma-separated evaluator names or "all". Defaults to eval-score's "Relevance,Coherence". */
+  evaluators?: string;
+}
+
+/** Canonical Step 6 scored-report shape, persisted to 06-score/agent-response-scores.json. */
+export interface ScoredReport {
+  jobId: string;
+  noEnhance: boolean;
+  judgeProvider: JudgeProvider;
+  judgeModel?: string;
+  datasetHash?: string;
+  evalSetHash?: string;
+  indexReadyAt?: string;
+  promptCount: number;
+  validPromptCount: number;
+  metadataProvenance?: {
+    titleFromSource: number;
+    urlFromSource: number;
+    iconUrlFromSource: number;
+    schemaPropertiesPromotedToSearchable: number;
+    schemaPropertiesPromotedToRefinable: number;
+  };
+  deterministicScore: {
+    average: number;
+    passCount: number;
+    partialCount: number;
+    failCount: number;
+    byCategory: Record<string, { count: number; average: number }>;
+  };
+  semanticScore: {
+    average: number;
+    byDimension: Record<string, number>;
+  };
+  citationRate: number;
+  retryCount: number;
+  rateLimitCount: number;
+  items: Array<{
+    id: string;
+    prompt: string;
+    expected: string;
+    actual: string;
+    category?: string;
+    deterministic: { score: number; status: 'pass' | 'partial' | 'fail'; assertionsPassed: number; assertionsTotal: number; factsPassed: number; factsTotal: number };
+    semantic: { score: number; byDimension?: Record<string, number>; rationale?: string };
+    citation?: boolean;
+  }>;
 }
 
 export interface JobConfig {
@@ -57,16 +98,33 @@ export interface JobConfig {
   connectorDescription?: string;
   /** Deploy artifacts to emit. */
   deployTarget: DeployTarget;
-  /** build = artifacts only; provision = actually provision + ingest. */
+  /** build = artifacts only; provision = full lifecycle + scoring. */
   mode: RunMode;
   /** ACL strategy for generated items. */
   aclMode: 'everyone' | 'everyoneExceptGuests' | 'none';
   /** Authentication for provision mode. */
   auth?: AuthConfig;
-  /** Run optional Step 6 (@microsoft/m365-copilot-eval) after deploy. */
-  runM365Eval?: boolean;
-  /** Step 6 configuration (only used when runM365Eval is true). */
-  m365Eval?: M365EvalConfig;
+  /**
+   * When true, Step 2 runs the identity-but-shape-aware transform instead of the
+   * data enhancer. The schema is still inferred from the source data shape;
+   * properties are 1:1 with sanitized source columns (no synthetic enrichment,
+   * no domain inference, no long-form pivot, no prompt-example folding).
+   * Steps 3-6 are unchanged.
+   */
+  noEnhance?: boolean;
+  /**
+   * Reuse the eval set from this previously-completed job (Step 1 copies its
+   * eval.csv / eval.evalgen.json verbatim). Required to pair two runs for
+   * post-hoc comparison so they share the same evalSetHash.
+   */
+  reuseEvalFromJobId?: string;
+  /**
+   * Reuse the eval set from this explicit path (must contain eval.csv +
+   * eval.evalgen.json). Mutually exclusive with reuseEvalFromJobId.
+   */
+  evalSetPath?: string;
+  /** Step 6 scoring configuration. */
+  score?: ScoreConfig;
   /** Declarative agent display name. Defaults to `${connectorName} Assistant`. */
   agentName?: string;
   /** Declarative agent system instructions. Defaults to auto-generated from description. */
@@ -104,6 +162,10 @@ export interface JobRecord {
   steps: Record<StepName, StepRecord>;
   /** Workspace directory absolute path. */
   workspace: string;
+  /** Canonical dataset hash (sha256:<hex>). Populated when the job is created and on first read for legacy jobs. */
+  datasetHash?: string;
+  /** Canonical eval-set hash (sha256:<hex>). Populated after Step 1 emits eval.evalgen.json. */
+  evalSetHash?: string;
 }
 
 export const ALL_STEPS: StepName[] = [
@@ -112,5 +174,5 @@ export const ALL_STEPS: StepName[] = [
   'schema',
   'connector',
   'deploy',
-  'm365eval',
+  'score',
 ];

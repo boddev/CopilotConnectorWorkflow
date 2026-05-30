@@ -35,9 +35,10 @@ describe('collectAliases', () => {
     expect(aliases.filter((x) => x === 'b').length).toBe(1);
   });
 
-  it('drops aliases that Graph schema registration would reject', () => {
+  it('drops aliases that Graph schema registration would reject (including underscores)', () => {
     const aliases = collectAliases({ aliases: ['primaryName', 'primary Name', '2bad', 'good_alias'] });
-    expect(aliases).toEqual(['primaryName', 'good_alias']);
+    // Graph disallows underscores in property/alias names; rejection of 'good_alias' is expected.
+    expect(aliases).toEqual(['primaryName']);
   });
 });
 
