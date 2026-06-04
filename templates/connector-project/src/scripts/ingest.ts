@@ -2,9 +2,16 @@ import { buildGraphClient, withRetry } from '../services/graphService';
 import { connection } from '../models/connection';
 import { defaultDataSource } from '../custom/dataSource';
 
-const CONCURRENCY = Number(process.env.INGEST_CONCURRENCY || '16');
+// Default to 4 concurrent in-flight PUTs. Higher values (16+) frequently
+// trigger Microsoft Graph external-connector throttling that the SDK reports
+// as JSON parse errors at request positions 2400-2600 — the SDK is trying to
+// JSON.parse a non-JSON 503/throttle body. At concurrency=4 we see ~99%+
+// ingest success on a 50k-row CSV; at 16 we saw ~90%. Operators with extra
+// tenant throughput headroom can raise this via INGEST_CONCURRENCY.
+const CONCURRENCY = Number(process.env.INGEST_CONCURRENCY || '4');
 
 async function ingestAll(): Promise<void> {
+  console.log(`Ingest concurrency: ${CONCURRENCY} (override via INGEST_CONCURRENCY env var).`);
   const client = buildGraphClient();
   const source = defaultDataSource();
   let count = 0;

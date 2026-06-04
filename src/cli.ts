@@ -50,7 +50,7 @@ Removed in this version:
 Options for 'run':
   --dataset <path>              Path to dataset folder/file (required)
   --description <text>          Natural-language description for eval-gen (required)
-  --count <n>                   Eval prompts to generate (5-50, default 30)
+  --count <n>                   Eval prompts to generate (5-200, default 30)
   --extensions <csv>            File extensions to include (e.g. csv,json)
   --connector-id <id>           3-128 alphanumeric chars (required)
   --connector-name <name>       Display name (required)
@@ -59,6 +59,23 @@ Options for 'run':
   --mode <mode>                 build | provision (default build). Step 6 only runs in provision mode.
   --no-enhance                  Skip Step 2 enrichment. Step 2 still infers a Graph schema
                                 from the shape of the source data and emits 1:1 items.
+                                Suppresses the auto-detector. Mutually exclusive with --force-enhance.
+  --force-enhance               Always run the enhancer, even if the auto-detector would
+                                otherwise recommend skipping it. Mutually exclusive with --no-enhance.
+  --no-auto-detect-pipeline     Disable the dataset-shape auto-detector. Default behavior reverts
+                                to "always run the enhancer" unless --no-enhance is also set.
+                                Use this for deterministic CI scripts that want consistent behavior
+                                across dataset shape changes.
+
+  Pipeline-selection rules (in order of precedence):
+    1. --force-enhance        → enhancer; detector disabled
+    2. --no-enhance           → identity transform; detector disabled
+    3. --no-auto-detect-pipeline → enhancer (historical default); detector disabled
+    4. (default)              → auto-detect on. The detector samples the dataset and
+                                picks identity transform for text-rich single-schema
+                                sources (recommended for clinical-trial-like JSONL),
+                                or the enhancer for everything else. See
+                                src/dataset-shape-detect.ts for the classifier.
   --reuse-eval-from <jobId>     Step 1 copies the eval set from this prior job instead of
                                 generating a new one. Required to pair two runs for compare.
   --eval-set <path>             Step 1 copies the eval set from this folder (eval.csv +
@@ -72,6 +89,8 @@ Options for 'run':
                                 operator must publish out-of-band and resume with --candidate-agent-id.
   --evaluators <names>          Comma-separated evaluator names or "all" (Relevance, Coherence,
                                 Groundedness, Similarity). Default: eval-score's "Relevance,Coherence".
+  --index-ready-min-minutes <n> Step 6 waits at least this many minutes after Step 5 ingestEndedAt
+                                before scoring. Default 60. Use 0 to disable.
   --acl-mode <mode>             everyone | everyoneExceptGuests | none (default everyone)
   --tenant-id <id>              (provision mode) Entra tenant ID
   --client-id <id>              (provision mode) Entra client ID
@@ -195,6 +214,16 @@ async function main(): Promise<void> {
       }
       job = createJob(cfg);
       console.log(`Created job ${job.id} at ${job.workspace}`);
+      if (job.config.pipelineDetection) {
+        const d = job.config.pipelineDetection;
+        const verb = d.appliedNoEnhance
+          ? 'Auto-detect → identity (skip enhancer)'
+          : `Auto-detect → ${d.recommendation} (keep enhancer)`;
+        console.log(`  ${verb}: ${d.reason}`);
+        if (d.appliedNoEnhance) {
+          console.log('  To override, rerun with --force-enhance or --no-auto-detect-pipeline.');
+        }
+      }
     } else {
       const id = flags.job;
       if (!id) { console.error('--job <id> required for resume'); process.exit(2); }
@@ -258,7 +287,7 @@ function buildConfigFromFlags(flags: Record<string, string>, booleans: Record<st
   const cfg: JobConfig = {
     dataset: path.resolve(required('dataset')),
     description: required('description'),
-    count: Math.min(50, Math.max(5, Number(flags.count || '30'))),
+    count: Math.min(200, Math.max(5, Number(flags.count || '30'))),
     extensions: flags.extensions ? flags.extensions.split(',').map((s) => s.trim()).filter(Boolean) : undefined,
     connectorId: required('connector-id'),
     connectorName: required('connector-name'),
@@ -284,6 +313,21 @@ function buildConfigFromFlags(flags: Record<string, string>, booleans: Record<st
 
   // Single-pipeline flags from STREAMLINED_CONNECTOR_EVAL_PLAN.md.
   if (booleans['no-enhance']) cfg.noEnhance = true;
+  if (booleans['force-enhance']) cfg.forceEnhance = true;
+  if (cfg.noEnhance && cfg.forceEnhance) {
+    throw new Error('--no-enhance and --force-enhance are mutually exclusive');
+  }
+  // Pipeline shape auto-detection is ON by default. The user can opt out
+  // with --no-auto-detect-pipeline (or with the explicit overrides
+  // --no-enhance and --force-enhance, which suppress the detector
+  // because the user has already made the choice). The auto-detect-pipeline
+  // flag is still accepted for backward compatibility but is now a no-op
+  // when set to true (it's the default).
+  if (booleans['no-auto-detect-pipeline'] || cfg.noEnhance || cfg.forceEnhance) {
+    cfg.autoDetectPipeline = false;
+  } else {
+    cfg.autoDetectPipeline = true;
+  }
   if (flags['reuse-eval-from'] && flags['eval-set']) {
     throw new Error('--reuse-eval-from and --eval-set are mutually exclusive');
   }
@@ -291,7 +335,7 @@ function buildConfigFromFlags(flags: Record<string, string>, booleans: Record<st
   if (flags['eval-set']) cfg.evalSetPath = path.resolve(flags['eval-set']);
 
   const judgeProviderFlag = flags['judge-provider'];
-  if (judgeProviderFlag || flags['judge-agent-id'] || flags['candidate-agent-id'] || booleans['skip-agent-publish'] || flags['evaluators']) {
+  if (judgeProviderFlag || flags['judge-agent-id'] || flags['candidate-agent-id'] || booleans['skip-agent-publish'] || flags['evaluators'] || flags['index-ready-min-minutes']) {
     const judgeProvider = (judgeProviderFlag || 'github-copilot') as JudgeProvider;
     if (judgeProvider !== 'github-copilot' && judgeProvider !== 'workiq') {
       throw new Error(`--judge-provider must be 'github-copilot' or 'workiq', got '${judgeProvider}'`);
@@ -305,6 +349,7 @@ function buildConfigFromFlags(flags: Record<string, string>, booleans: Record<st
       candidateAgentId: flags['candidate-agent-id'],
       skipAgentPublish: booleans['skip-agent-publish'] || undefined,
       evaluators: flags['evaluators'],
+      indexReadySettleMinutes: flags['index-ready-min-minutes'] ? Number(flags['index-ready-min-minutes']) : undefined,
     };
   }
 

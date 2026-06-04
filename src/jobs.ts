@@ -1,8 +1,9 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { JobRecord, JobConfig, StepName, StepRecord, ALL_STEPS } from './types';
+import { JobRecord, JobConfig, StepName, StepRecord, ALL_STEPS, PipelineDetection } from './types';
 import { hashDataset, hashEvalSetFile } from './canonical-hash';
+import { detectDatasetShape } from './dataset-shape-detect';
 
 const WORKSPACE_ROOT = path.resolve(__dirname, '..', 'workspace', 'jobs');
 
@@ -26,6 +27,7 @@ export function jobDir(jobId: string): string {
 
 export function createJob(config: JobConfig): JobRecord {
   validateConfig(config);
+  applyPipelineDetection(config);
   const id = newJobId();
   const dir = jobDir(id);
   fs.mkdirSync(dir, { recursive: true });
@@ -49,7 +51,81 @@ export function createJob(config: JobConfig): JobRecord {
     datasetHash,
   };
   saveJob(job);
+  // Persist a copy of the detection result to a dedicated audit file so it
+  // survives job-record schema changes and is greppable.
+  if (config.pipelineDetection) {
+    const auditDir = path.join(dir, '00-shape-detect');
+    fs.mkdirSync(auditDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(auditDir, 'shape-detect.json'),
+      JSON.stringify(config.pipelineDetection, null, 2),
+      'utf-8',
+    );
+  }
   return job;
+}
+
+/**
+ * Decide whether to auto-flip noEnhance based on dataset shape. Precedence:
+ *   forceEnhance > noEnhance (explicit) > autoDetectPipeline > default
+ *
+ * Conservative behavior: only flips to noEnhance=true when the detector is
+ * confident the dataset is text-rich AND effectively single-schema. The
+ * detection result is recorded as evidence whenever the detector runs.
+ */
+function applyPipelineDetection(config: JobConfig): void {
+  // Explicit user choice wins; never overrule. forceEnhance is the strongest
+  // signal — the user wants the enhancer no matter what.
+  if (config.forceEnhance) {
+    if (config.noEnhance) {
+      throw new Error('forceEnhance and noEnhance are mutually exclusive');
+    }
+    config.noEnhance = false;
+    return;
+  }
+  if (config.noEnhance !== undefined) {
+    // User has explicitly opted in or out of enhancement.
+    return;
+  }
+  if (!config.autoDetectPipeline) {
+    return;
+  }
+
+  let detection;
+  try {
+    detection = detectDatasetShape(config.dataset, config.extensions);
+  } catch (e) {
+    // Detection is best-effort; never block job creation.
+    const message = e instanceof Error ? e.message : String(e);
+    config.pipelineDetection = {
+      recommendation: 'enhance',
+      appliedNoEnhance: false,
+      recordsSampled: 0,
+      filesScanned: 0,
+      distinctSchemas: 0,
+      dominantSchemaShare: 0,
+      dominantSchema: [],
+      textRichFields: [],
+      reason: `detection failed: ${message}`,
+    };
+    return;
+  }
+
+  const appliedNoEnhance = detection.recommendation === 'identity';
+  if (appliedNoEnhance) {
+    config.noEnhance = true;
+  }
+  config.pipelineDetection = {
+    recommendation: detection.recommendation,
+    appliedNoEnhance,
+    recordsSampled: detection.recordsSampled,
+    filesScanned: detection.filesScanned,
+    distinctSchemas: detection.distinctSchemas,
+    dominantSchemaShare: detection.dominantSchemaShare,
+    dominantSchema: detection.dominantSchema,
+    textRichFields: detection.textRichFields,
+    reason: detection.reason,
+  } satisfies PipelineDetection;
 }
 
 /**
@@ -93,7 +169,7 @@ export function validateConfig(c: JobConfig): void {
   if (!c.dataset) throw new Error('dataset is required');
   if (!fs.existsSync(c.dataset)) throw new Error(`dataset not found: ${c.dataset}`);
   if (!c.description || c.description.length < 10) throw new Error('description must be at least 10 characters');
-  if (!c.count || c.count < 5 || c.count > 50) throw new Error('count must be 5-50');
+  if (!c.count || c.count < 5 || c.count > 200) throw new Error('count must be 5-200');
   if (!c.connectorId || !/^[a-zA-Z0-9]{3,128}$/.test(c.connectorId)) {
     throw new Error('connectorId must be 3-128 alphanumeric characters (no symbols)');
   }

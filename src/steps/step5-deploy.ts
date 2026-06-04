@@ -135,15 +135,36 @@ export async function runStep5Deploy(opts: RunStepOptions): Promise<StepRecord> 
   lifecycleResources.connectionId = job.config.connectorId;
   lifecycleResources.schemaRegisteredAt = new Date().toISOString();
 
-  // 2. Ingest seed items.
+  // 2. Ingest seed items. Run twice (idempotent PUTs) to pick up any items
+  //    dropped on the first pass due to transient throttling / SDK JSON-parse
+  //    errors on throttle responses. Empirically the second pass at the same
+  //    concurrency recovers nearly all dropped items because the throttle
+  //    window has elapsed and the SDK retries are seeded with fresh tokens.
   lifecycleResources.ingestStartedAt = new Date().toISOString();
   const ingest = await runProcess({
     cmd: npmCmd, args: ['run', 'ingest'], cwd: projectDir, env, emitter, label: 'ingest', logFile: lifecycleLog,
   });
   lifecycleResources.ingestEndedAt = new Date().toISOString();
   if (!ingest.ok) {
-    finishStep(rec, 'failed', `Step 5: 'npm run ingest' exit ${ingest.exitCode}; see ${lifecycleLog}`);
+    rec.diagnostics?.push(`first ingest pass exit ${ingest.exitCode} — items dropped; auto-retry pass scheduled.`);
+  } else {
+    rec.diagnostics?.push('first ingest pass succeeded; auto-retry pass scheduled for any straggling items.');
+  }
+  // Pass 2: always run (idempotent). The CONCURRENCY=4 default keeps this
+  // cheap relative to the first pass for the small subset of failing items.
+  const ingestRetry = await runProcess({
+    cmd: npmCmd, args: ['run', 'ingest'], cwd: projectDir, env, emitter, label: 'ingest-retry', logFile: lifecycleLog,
+  });
+  lifecycleResources.ingestEndedAt = new Date().toISOString();
+  if (!ingestRetry.ok && !ingest.ok) {
+    finishStep(rec, 'failed',
+      `Step 5: both ingest passes failed (first exit ${ingest.exitCode}, retry exit ${ingestRetry.exitCode}); see ${lifecycleLog}`);
     writeStepStatus(stepDir, rec); return rec;
+  }
+  if (!ingestRetry.ok) {
+    rec.diagnostics?.push(`ingest-retry pass exit ${ingestRetry.exitCode}; some items may still be missing — see ${lifecycleLog}`);
+  } else {
+    rec.diagnostics?.push('ingest-retry pass completed cleanly.');
   }
   const itemsJsonl = path.join(projectDir, 'data', 'enhanced-items.jsonl');
   if (fs.existsSync(itemsJsonl)) {
@@ -230,10 +251,14 @@ async function tryAutoPublishAgent(opts: {
   logFile: string;
   diagnostics: string[];
 }): Promise<PublishResult> {
-  const atkCmd = process.platform === 'win32' ? 'atk.cmd' : 'atk';
-  // Probe atk presence cheaply (--version). If atk is not on PATH, spawn
-  // throws ENOENT synchronously via spawnSync.
-  const probe = spawnSync(atkCmd, ['--version'], { shell: false, encoding: 'utf-8' });
+  // Node 20+ requires shell:true on Windows to spawn .cmd/.bat shims (otherwise
+  // EINVAL). atk on Windows is atk.cmd; using shell:true with quoted args is
+  // the right pattern.
+  const isWin = process.platform === 'win32';
+  const atkCmd = isWin ? 'atk.cmd' : 'atk';
+  // Probe atk presence cheaply (--version). spawnSync returns error/non-zero
+  // status if not installed; we degrade gracefully in either case.
+  const probe = spawnSync(atkCmd, ['--version'], { shell: isWin, encoding: 'utf-8' });
   if (probe.error || probe.status !== 0) {
     return { reason: `atk CLI not available on PATH (${probe.error?.message || `exit ${probe.status}`})` };
   }
@@ -252,8 +277,10 @@ async function tryAutoPublishAgent(opts: {
   appendLog(opts.logFile, `\n[atk install] zipped appPackage → ${zipPath} (${fs.statSync(zipPath).size} bytes)\n`);
 
   // Invoke atk install. Capture stdout+stderr to extract the TitleId.
-  const install = spawnSync(atkCmd, ['install', '--file-path', zipPath], {
-    shell: false,
+  // Quote zipPath because shell:true on Windows splits on whitespace.
+  const quotedZip = isWin ? `"${zipPath}"` : zipPath;
+  const install = spawnSync(atkCmd, ['install', '--file-path', quotedZip], {
+    shell: isWin,
     encoding: 'utf-8',
     cwd: opts.projectDir,
   });

@@ -35,6 +35,8 @@ export interface ScoreConfig {
   skipAgentPublish?: boolean;
   /** Comma-separated evaluator names or "all". Defaults to eval-score's "Relevance,Coherence". */
   evaluators?: string;
+  /** Minimum elapsed minutes between Step 5 ingestEndedAt and Step 6 start. Step 6 sleeps if under threshold. Default 60. Set 0 to disable. */
+  indexReadySettleMinutes?: number;
 }
 
 /** Canonical Step 6 scored-report shape, persisted to 06-score/agent-response-scores.json. */
@@ -81,6 +83,26 @@ export interface ScoredReport {
   }>;
 }
 
+/**
+ * Result of createJob's optional dataset shape detection. Persisted to
+ * job.config.pipelineDetection for auditability. See
+ * src/dataset-shape-detect.ts for the classifier.
+ */
+export interface PipelineDetection {
+  /** identity = recommend skip enhance; enhance = recommend enhance; tie = no recommendation. */
+  recommendation: 'identity' | 'enhance' | 'tie';
+  /** Whether createJob actually flipped noEnhance based on this detection. */
+  appliedNoEnhance: boolean;
+  recordsSampled: number;
+  filesScanned: number;
+  distinctSchemas: number;
+  dominantSchemaShare: number;
+  dominantSchema: string[];
+  textRichFields: Array<{ field: string; proseShare: number; averageLength: number; sampleValue: string }>;
+  /** Human-readable explanation. */
+  reason: string;
+}
+
 export interface JobConfig {
   /** Dataset folder or file. */
   dataset: string;
@@ -112,6 +134,27 @@ export interface JobConfig {
    * Steps 3-6 are unchanged.
    */
   noEnhance?: boolean;
+  /**
+   * Dataset-shape auto-detection. ON by default (set by buildConfigFromFlags
+   * when none of --no-enhance / --force-enhance / --no-auto-detect-pipeline
+   * is passed). When true, createJob runs the dataset shape detector and may
+   * flip noEnhance=true for text-rich single-schema datasets. See
+   * src/dataset-shape-detect.ts and
+   * workspace/compare-runs/cross-dataset-analysis-rerun.md for the rationale.
+   */
+  autoDetectPipeline?: boolean;
+  /**
+   * When true, the user explicitly wants the enhancer regardless of any
+   * auto-detection signal. Mutually exclusive with noEnhance. Suppresses
+   * autoDetectPipeline.
+   */
+  forceEnhance?: boolean;
+  /**
+   * Populated by createJob when autoDetectPipeline ran. Records the detector's
+   * recommendation and the evidence behind it, so resume runs and audits can
+   * trace why noEnhance was set automatically.
+   */
+  pipelineDetection?: PipelineDetection;
   /**
    * Reuse the eval set from this previously-completed job (Step 1 copies its
    * eval.csv / eval.evalgen.json verbatim). Required to pair two runs for

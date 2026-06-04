@@ -133,6 +133,11 @@ function hardenSchema(suggestionProps: Array<Record<string, unknown>>): GraphCon
   ensureLabel(out, 'url', 'url');
   // Soft-promote iconUrl if a matching property exists (not auto-injected like title/url)
   softEnsureIconUrl(out);
+  // Final enforcement: ensureLabel may have unshifted title/url to the front,
+  // pushing total beyond Graph's 128 cap. Trim from the END so the labeled
+  // title/url stay registered. The tail rows are typically the lowest-priority
+  // source columns that were appended last by identity-transform.
+  if (out.length > 128) out.length = 128;
   return { baseType: 'microsoft.graph.externalItem', properties: out };
 }
 

@@ -95,12 +95,29 @@ export async function runStep6Score(opts: RunStepOptions): Promise<StepRecord> {
     rec.diagnostics?.push(`judge preflight ok: copilot CLI ${preflight.model || 'unknown model'}`);
   }
 
-  // 2. Indexing-readiness gate (scaffolded). When tenant access is wired in
-  //    Step 5's lifecycle, this should issue canary prompts via the candidate
-  //    agent until a non-empty, non-rate-limited answer comes back, then
-  //    persist indexReadyAt. Today we fall through with a clear diagnostic.
-  rec.diagnostics?.push('indexing-readiness gate scaffolded; full canary-prompt loop is follow-up work');
-  const indexReadyAt = new Date().toISOString();
+  // 2. Indexing-readiness gate. Two parts:
+  //    (a) settle-minutes: enforce a minimum elapsed time since Step 5's
+  //        ingestEndedAt so M365 Graph indexing has a chance to catch up after
+  //        a fresh ingest. Defaults to 60 min; configurable via
+  //        `score.indexReadySettleMinutes` (0 to disable).
+  //    (b) canary-prompt loop: issue 3 known-answerable canaries through the
+  //        candidate agent and require non-empty / non-"can't find" answers
+  //        before scoring proceeds. Caps total wait at indexReadyMaxSeconds
+  //        (default 5400 = 90 min ceiling INCLUDING the settle phase).
+  const settleMinutes = scoreCfg.indexReadySettleMinutes ?? 60;
+  const settleResult = await waitForIndexSettle(job.workspace, settleMinutes, emitter);
+  if (settleResult.diagnostic) rec.diagnostics?.push(settleResult.diagnostic);
+
+  const canaryResult = await waitForCanaryReady({
+    workspace: job.workspace,
+    candidateAgentId,
+    tenantId: job.config.auth?.tenantId,
+    maxSeconds: scoreCfg.indexReadyMaxSeconds ?? 5400,
+    elapsedSecondsBeforeCanaries: settleResult.elapsedSeconds,
+    emitter,
+  });
+  if (canaryResult.diagnostic) rec.diagnostics?.push(canaryResult.diagnostic);
+  const indexReadyAt = canaryResult.readyAt ?? new Date().toISOString();
 
   // 3. Invoke eval-score.
   const tenantId = job.config.auth?.tenantId;
@@ -208,6 +225,201 @@ export async function runStep6Score(opts: RunStepOptions): Promise<StepRecord> {
   finishStep(rec, 'done');
   writeStepStatus(stepDir, rec);
   return rec;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Indexing-readiness gate (N2 + N3)                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Phase A — settle window. Wait until at least `settleMinutes` have elapsed
+ * since Step 5's ingestEndedAt timestamp. Returns the actual elapsed seconds
+ * (after any sleep) and a diagnostic message.
+ *
+ * Rationale: a Microsoft Graph external connection takes meaningful time to
+ * propagate fresh items into the M365 Copilot index. Scoring against a still-
+ * indexing connection produces transient "I couldn't find any matching record"
+ * answers that look like quality regressions but are actually indexing lag.
+ */
+async function waitForIndexSettle(
+  workspace: string,
+  settleMinutes: number,
+  emitter?: import('events').EventEmitter,
+): Promise<{ elapsedSeconds: number; diagnostic?: string }> {
+  if (settleMinutes <= 0) {
+    return { elapsedSeconds: 0, diagnostic: 'index-settle gate disabled (indexReadySettleMinutes=0)' };
+  }
+  const resourcesPath = path.join(workspace, '05-deploy', 'resources.json');
+  if (!fs.existsSync(resourcesPath)) {
+    return { elapsedSeconds: 0, diagnostic: `index-settle gate: no resources.json at ${resourcesPath}; skipping` };
+  }
+  let ingestEndedAt: string | undefined;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(resourcesPath, 'utf-8')) as { ingestEndedAt?: string };
+    ingestEndedAt = parsed.ingestEndedAt;
+  } catch {
+    // ignore
+  }
+  if (!ingestEndedAt) {
+    return { elapsedSeconds: 0, diagnostic: 'index-settle gate: ingestEndedAt missing from resources.json; skipping' };
+  }
+  const elapsedSec = Math.floor((Date.now() - new Date(ingestEndedAt).getTime()) / 1000);
+  const requiredSec = settleMinutes * 60;
+  if (elapsedSec >= requiredSec) {
+    return {
+      elapsedSeconds: elapsedSec,
+      diagnostic: `index-settle gate: elapsed ${Math.floor(elapsedSec / 60)}m since ingest >= required ${settleMinutes}m; proceeding`,
+    };
+  }
+  const remainingSec = requiredSec - elapsedSec;
+  emitter?.emit('log', { label: 'score', text: `[score] index-settle: sleeping ${Math.floor(remainingSec / 60)}m (elapsed ${Math.floor(elapsedSec / 60)}m / required ${settleMinutes}m)\n` });
+  await new Promise((r) => setTimeout(r, remainingSec * 1000));
+  return {
+    elapsedSeconds: requiredSec,
+    diagnostic: `index-settle gate: slept ${Math.floor(remainingSec / 60)}m to reach ${settleMinutes}m settle window since ingestEndedAt`,
+  };
+}
+
+/**
+ * Phase B — canary-prompt loop. Probe the candidate M365 agent with 3 fixed
+ * known-answerable canaries until ALL return non-empty, non-"can't find"
+ * answers, or until indexReadyMaxSeconds (cumulative with the settle phase)
+ * is reached.
+ *
+ * The canaries use the existing eval.csv content if possible (first 3 prompts);
+ * falls back to fixed canaries derived from the connection if eval.csv is
+ * missing.
+ */
+async function waitForCanaryReady(opts: {
+  workspace: string;
+  candidateAgentId: string;
+  tenantId?: string;
+  maxSeconds: number;
+  elapsedSecondsBeforeCanaries: number;
+  emitter?: import('events').EventEmitter;
+}): Promise<{ diagnostic?: string; readyAt?: string }> {
+  const { workspace, candidateAgentId, tenantId, maxSeconds, elapsedSecondsBeforeCanaries, emitter } = opts;
+  const remainingBudgetSec = Math.max(60, maxSeconds - elapsedSecondsBeforeCanaries);
+  // Read first 3 eval prompts as canaries. If eval.csv missing, skip the gate.
+  const evalCsv = path.join(workspace, '01-evalgen', 'eval.csv');
+  if (!fs.existsSync(evalCsv)) {
+    return { diagnostic: 'canary gate: no eval.csv to source canaries from; skipping' };
+  }
+  let canaries: string[];
+  try {
+    canaries = readCanaryPrompts(evalCsv).slice(0, 3);
+  } catch (e) {
+    return { diagnostic: `canary gate: failed to read eval prompts: ${(e as Error).message}; skipping` };
+  }
+  if (canaries.length === 0) {
+    return { diagnostic: 'canary gate: no canary prompts available; skipping' };
+  }
+  // Probe with WorkIQ A2A using the env-var token approach the Step 6 runner
+  // already relies on. We invoke a minimal A2A client inline to avoid spinning
+  // up the full eval-score pipeline just for canaries.
+  const endpoint = process.env.WORK_IQ_A2A_ENDPOINT;
+  const token = process.env.WORK_IQ_A2A_ACCESS_TOKEN;
+  if (!endpoint || !token) {
+    return { diagnostic: 'canary gate: WORK_IQ_A2A_ENDPOINT/ACCESS_TOKEN env vars not set; skipping' };
+  }
+  const startMs = Date.now();
+  let attempt = 0;
+  while ((Date.now() - startMs) / 1000 < remainingBudgetSec) {
+    attempt++;
+    const results = await Promise.all(canaries.map((p) => probeCanary(endpoint, token, candidateAgentId, p, tenantId)));
+    const allOk = results.every((r) => r.ok);
+    const summary = results.map((r, i) => `${i + 1}=${r.ok ? 'ok' : `'${r.reason ?? 'fail'}'`}`).join(' ');
+    emitter?.emit('log', { label: 'score', text: `[score] canary attempt ${attempt}: ${summary}\n` });
+    if (allOk) {
+      return { diagnostic: `canary gate: all ${canaries.length} canaries returned non-empty answers on attempt ${attempt}`, readyAt: new Date().toISOString() };
+    }
+    // Backoff: wait 60s between probe rounds (each probe round itself takes ~15s × 3 canaries).
+    if ((Date.now() - startMs) / 1000 + 60 < remainingBudgetSec) {
+      await new Promise((r) => setTimeout(r, 60_000));
+    } else {
+      break;
+    }
+  }
+  return {
+    diagnostic: `canary gate: budget exhausted (${Math.floor(remainingBudgetSec / 60)}m); proceeding without all canaries green — scores may be degraded`,
+    readyAt: new Date().toISOString(),
+  };
+}
+
+function readCanaryPrompts(evalCsv: string): string[] {
+  // Minimal CSV reader for the first column: just enough for the canary loop.
+  // eval-score's own CSV reader handles full RFC 4180 quoting; we accept that
+  // a multiline/quoted-with-commas prompt won't parse here and just skip it.
+  const text = fs.readFileSync(evalCsv, 'utf-8');
+  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  if (lines.length <= 1) return [];
+  // Header detection: if first row contains "prompt" (case-insensitive), skip it.
+  const headerCells = lines[0].split(',');
+  let startIdx = 0;
+  if (headerCells.some((c) => c.toLowerCase().includes('prompt'))) startIdx = 1;
+  const out: string[] = [];
+  for (let i = startIdx; i < lines.length && out.length < 10; i++) {
+    let cell = lines[i].split(',')[0]?.trim() ?? '';
+    if (cell.startsWith('"') && cell.endsWith('"')) cell = cell.slice(1, -1).replace(/""/g, '"');
+    if (cell.length > 0) out.push(cell);
+  }
+  return out;
+}
+
+interface CanaryResult { ok: boolean; reason?: string; }
+
+async function probeCanary(
+  endpoint: string,
+  token: string,
+  agentId: string,
+  prompt: string,
+  tenantId: string | undefined,
+): Promise<CanaryResult> {
+  // Minimal A2A message/send call. The full eval-score WorkIQ A2A client
+  // builds richer metadata, but for the readiness gate we just need the
+  // assistant's text answer.
+  const url = endpoint.replace(/\/$/, '') + '/' + encodeURIComponent(agentId);
+  const body = {
+    jsonrpc: '2.0',
+    id: `canary-${Date.now()}`,
+    method: 'message/send',
+    params: {
+      message: {
+        kind: 'message',
+        role: 'user',
+        parts: [{ kind: 'text', text: prompt }],
+        messageId: `canary-msg-${Date.now()}`,
+      },
+    },
+  };
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${token}`,
+        ...(tenantId ? { 'x-anchormailbox': tenantId } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) return { ok: false, reason: `HTTP ${resp.status}` };
+    const json = await resp.json() as { result?: { artifacts?: Array<{ parts?: Array<{ kind?: string; text?: string }> }> } };
+    const artifacts = json.result?.artifacts ?? [];
+    const text = artifacts
+      .flatMap((a) => a.parts ?? [])
+      .filter((p) => p.kind === 'text' && typeof p.text === 'string')
+      .map((p) => p.text as string)
+      .join('\n');
+    if (!text || text.trim().length === 0) return { ok: false, reason: 'empty' };
+    // Detect "I can't find" / "no matching records" patterns that indicate
+    // the index isn't ready yet for this prompt.
+    const lower = text.toLowerCase();
+    const cantFindPatterns = ['no matching record', 'no matching records', "i couldn't find", 'no records returned', "i wasn't able to find", 'not in the available'];
+    if (cantFindPatterns.some((p) => lower.includes(p))) return { ok: false, reason: 'cant-find' };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 /* -------------------------------------------------------------------------- */

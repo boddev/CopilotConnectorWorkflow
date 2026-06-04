@@ -1832,6 +1832,14 @@ export function datasetFiles(datasetPath: string, extensions: Set<string>, exclu
     return extensions.has(ext) ? [resolved] : [];
   }
   const excludedResolved = new Set((excludeFiles || []).filter(f => f).map(f => path.resolve(f)));
+  // R1: exclude directories that conventionally hold the eval set (matches
+  // identity-transform.ts behavior). Without this the enhancer indexes the
+  // operator-supplied ground-truth Q/A pairs as connector items, polluting
+  // retrieval and inflating simple-lookup scores via leakage.
+  const EXCLUDED_DIR_NAMES = new Set(['evalset', 'eval-set', 'eval_set', 'workspace', 'node_modules', '.git']);
+  // Also exclude any file whose basename starts with eval-set / eval_set
+  // (covers operators who don't use a dedicated directory).
+  const EXCLUDED_FILE_PATTERN = /^eval[-_]?set/i;
   const results: string[] = [];
   function walk(dir: string): void {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -1844,8 +1852,14 @@ export function datasetFiles(datasetPath: string, extensions: Set<string>, exclu
         continue;
       }
       if (entry.isDirectory()) {
+        if (entry.name.startsWith('_') || EXCLUDED_DIR_NAMES.has(entry.name.toLowerCase())) {
+          continue;
+        }
         walk(full);
       } else if (entry.isFile()) {
+        if (EXCLUDED_FILE_PATTERN.test(entry.name)) {
+          continue;
+        }
         const ext = path.extname(entry.name).toLowerCase().replace(".", "");
         if (extensions.has(ext)) {
           results.push(full);
@@ -1930,6 +1944,21 @@ export function buildRecordContent(opts: {
   const lines: string[] = [
     `${title}${rowNumber !== null ? ` (sourceRow=${rowNumber})` : ""}`,
   ];
+
+  // R2: emit a verbatim `key: value` block FIRST so literal-value filter
+  // queries ("which rows have negative land_use_change_co2 = -1.517?") can
+  // anchor on the raw source-column names + values, matching what
+  // identity-transform produces. The narrative "Key facts:" section follows
+  // for semantic / paraphrased queries. This boosts groundedness (the judge
+  // can verify each fact against the literal block) without losing the
+  // analytical benefits of the narrative.
+  lines.push("", "Raw fields:");
+  for (const f of header) {
+    if (!isEmpty(row[f])) {
+      lines.push(`${f}: ${row[f]}`);
+    }
+  }
+
   lines.push("", "Key facts:");
 
   const keyFields: string[] = priorityFields.filter(f => f in row && !isEmpty(row[f]));
@@ -2636,10 +2665,19 @@ export function run(args: RunArgs): Record<string, unknown> {
         year,
         isoCode: findFirst(row, config.keyFieldCandidates.iso || []),
       };
+      // R3: carry EVERY non-empty source column as a typed property, matching
+      // identity-transform's behavior. Previously the enhancer only emitted
+      // properties for fields that appeared in the eval-gen sidecar's
+      // supportingFacts — which meant Graph's typed-property index didn't
+      // know about most columns. Use the same name-sanitization
+      // (graphSchemaPropertyName) so the property keys align with the
+      // registered schema. The function mutates usedSchemaNames to keep
+      // collision-suffix assignments stable per-row.
+      const usedSchemaNames = new Set<string>(Object.keys(properties));
       for (const fieldName of header) {
-        if (evalFieldCounts.has(fieldName) && !isEmpty(row[fieldName])) {
-          properties[fieldName] = row[fieldName];
-        }
+        if (isEmpty(row[fieldName])) continue;
+        const schemaName = graphSchemaPropertyName(fieldName, usedSchemaNames);
+        properties[schemaName] = row[fieldName];
       }
 
       const item = graphLikeItem({
