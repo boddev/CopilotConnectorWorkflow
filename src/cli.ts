@@ -198,7 +198,7 @@ async function main(): Promise<void> {
   }
   if (cmd === 'compare-dataset' || cmd === 'compare-batch') {
     console.error(
-      `'${cmd}' was removed by STREAMLINED_CONNECTOR_EVAL_PLAN.md task 9.\n` +
+      `'${cmd}' was removed when the comparator was consolidated.\n` +
       `Use 'ccw run --no-enhance --reuse-eval-from <enhancedJobId> ...' to create a paired non-enhanced run,\n` +
       `then 'ccw compare --job <enhancedJobId> --job <nonEnhancedJobId>' to diff them.`,
     );
@@ -311,7 +311,7 @@ function buildConfigFromFlags(flags: Record<string, string>, booleans: Record<st
   }
   if (flags['url-prefix']) cfg.urlPrefix = flags['url-prefix'];
 
-  // Single-pipeline flags from STREAMLINED_CONNECTOR_EVAL_PLAN.md.
+  // Single-pipeline flags. See README "Quick start — CLI" for usage.
   if (booleans['no-enhance']) cfg.noEnhance = true;
   if (booleans['force-enhance']) cfg.forceEnhance = true;
   if (cfg.noEnhance && cfg.forceEnhance) {

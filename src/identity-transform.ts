@@ -1,7 +1,9 @@
 /**
  * Identity-but-shape-aware transform for the `--no-enhance` Step 2 branch.
  *
- * See STREAMLINED_CONNECTOR_EVAL_PLAN.md Step 2 (`--no-enhance` set).
+ * Selected automatically by the dataset-shape auto-detector for text-rich
+ * single-schema datasets (see src/dataset-shape-detect.ts), or explicitly
+ * via `--no-enhance` on the CLI.
  *
  *  - Walks the source rows once to infer field types and the column list.
  *  - Sanitizes column names to Graph-valid schema property names.

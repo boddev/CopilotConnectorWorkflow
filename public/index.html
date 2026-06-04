@@ -48,7 +48,7 @@
             <input name="noEnhance" type="checkbox">
             Skip enhancement (identity transform with shape-derived schema)
           </label>
-          <p class="hint">When set, Step 2 still infers a Graph schema from the source data shape and writes <code>enhanced-items.jsonl</code> + <code>schema-suggestion.json</code> so Steps 3–6 run unchanged. See STREAMLINED_CONNECTOR_EVAL_PLAN.md &rarr; Step 2 (<code>--no-enhance</code>).</p>
+          <p class="hint">When set, Step 2 still infers a Graph schema from the source data shape and writes <code>enhanced-items.jsonl</code> + <code>schema-suggestion.json</code> so Steps 3–6 run unchanged. Leave unchecked to let the auto-detector pick between enhancer and identity-transform based on dataset shape.</p>
         </fieldset>
         <fieldset id="eval-source-fields">
           <legend>Step 1 — eval set source</legend>

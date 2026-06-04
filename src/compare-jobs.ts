@@ -7,7 +7,7 @@
  *
  * Never renders, builds, provisions, ingests, or calls Copilot.
  *
- * Pre-conditions (see STREAMLINED_CONNECTOR_EVAL_PLAN.md "Post-hoc comparator"):
+ * Pre-conditions:
  *  - Both jobs ran in mode=provision and reached Step 6 done.
  *  - Same canonical datasetHash.
  *  - Same canonical evalSetHash.

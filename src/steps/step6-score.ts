@@ -1,8 +1,6 @@
 /**
  * Step 6: score (eval-score driver).
  *
- * See STREAMLINED_CONNECTOR_EVAL_PLAN.md "Step 6 — score".
- *
  *  - Skips when mode != 'provision' with a `requires-provision-mode` diagnostic.
  *  - Runs `..\EvaluationCLI\eval-score` against the candidate M365 agent.
  *  - Default judge provider: github-copilot (local copilot CLI).

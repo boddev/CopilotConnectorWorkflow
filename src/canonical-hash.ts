@@ -1,5 +1,5 @@
 /**
- * Canonical hashing per STREAMLINED_CONNECTOR_EVAL_PLAN.md "Canonical hashing".
+ * Canonical hashing for dataset and eval-set contents.
  *
  * The post-hoc comparator (ccw compare) uses these hashes to verify that two
  * jobs ran against the same dataset and the same eval set. Hashes are stable
