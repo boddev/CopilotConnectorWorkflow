@@ -17,4 +17,8 @@
     <ProjectReference Include="..\..\src\Ccw.Core\Ccw.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Update="Fixtures\**\*.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

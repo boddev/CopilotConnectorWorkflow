@@ -1,0 +1,79 @@
+{
+  "id": "20251031t170422-ngo-environment",
+  "createdAt": "2025-10-31T17:04:22.123Z",
+  "updatedAt": "2025-10-31T17:09:51.842Z",
+  "status": "done",
+  "config": {
+    "dataset": "data/ngo-environment",
+    "description": "NGO environmental impact dataset",
+    "count": 25,
+    "extensions": [
+      ".md",
+      ".txt"
+    ],
+    "connectorId": "ngo-environment",
+    "connectorName": "NGO Environment",
+    "deployTarget": "azure-functions",
+    "mode": "build",
+    "aclMode": "everyone",
+    "noEnhance": true,
+    "autoDetectPipeline": true,
+    "pipelineDetection": {
+      "recommendation": "identity",
+      "appliedNoEnhance": true,
+      "recordsSampled": 12,
+      "filesScanned": 12,
+      "distinctSchemas": 1,
+      "dominantSchemaShare": 1,
+      "dominantSchema": [
+        "title",
+        "body"
+      ],
+      "textRichFields": [
+        {
+          "field": "body",
+          "proseShare": 0.92,
+          "averageLength": 1840.5,
+          "sampleValue": "The Sundarbans mangrove forest..."
+        }
+      ],
+      "reason": "All sampled files match one schema and the body field is prose-heavy."
+    }
+  },
+  "steps": {
+    "evalgen": {
+      "name": "evalgen",
+      "status": "done",
+      "startedAt": "2025-10-31T17:04:23.000Z",
+      "endedAt": "2025-10-31T17:05:11.000Z",
+      "exitCode": 0,
+      "inputsHash": "sha256:aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa7777bbbb8888"
+    },
+    "enhance": {
+      "name": "enhance",
+      "status": "skipped"
+    },
+    "schema": {
+      "name": "schema",
+      "status": "done",
+      "exitCode": 0
+    },
+    "connector": {
+      "name": "connector",
+      "status": "done",
+      "exitCode": 0
+    },
+    "deploy": {
+      "name": "deploy",
+      "status": "done",
+      "exitCode": 0
+    },
+    "score": {
+      "name": "score",
+      "status": "skipped"
+    }
+  },
+  "workspace": "C:\\Users\\demo\\AppData\\Local\\CopilotConnectorWorkflow\\workspace\\jobs\\20251031t170422-ngo-environment",
+  "datasetHash": "sha256:1111aaaa2222bbbb3333cccc4444dddd5555eeee6666ffff7777aaaa8888bbbb",
+  "evalSetHash": "sha256:9999aaaa8888bbbb7777cccc6666dddd5555eeee4444ffff3333aaaa2222bbbb"
+}

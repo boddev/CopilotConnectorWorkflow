@@ -1,10 +1,10 @@
+// Phase 1a landed the real types under Ccw.Core.Models. CoreInfo remains
+// only as a build-time anchor for the SchemaVersion constant — bumped
+// whenever a Phase 1 slice changes the on-disk shape of job.json or a
+// sibling artifact.
+
 namespace Ccw.Core;
 
-/// <summary>
-/// Placeholder for Phase 0 scaffold. Real types land in Phase 1a
-/// (<c>types.ts</c> -> records) and Phase 1b-1i (hashing, jobs, scoring,
-/// dataset, comparator, templating, process, tools).
-/// </summary>
 public static class CoreInfo
 {
     /// <summary>Schema / on-disk format version. Bumped when a Phase 1 slice
