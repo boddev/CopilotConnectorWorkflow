@@ -144,7 +144,20 @@ public sealed class GraphClientCredentialsProbe
 
     /// <summary>Mirrors Node <c>summarizeJsonError</c>: tries JSON-parse, picks
     /// <c>error</c> + <c>error_description</c> (or <c>message</c>), joins with
-    /// " - "; falls back to truncated raw text on parse failure.</summary>
+    /// " - "; falls back to truncated raw text on parse failure.
+    ///
+    /// <para>INTENTIONAL PARITY (do NOT "fix"):</para>
+    /// <list type="bullet">
+    ///   <item>Graph error envelopes (<c>{"error":{"code":"…","message":"…"}}</c>)
+    ///   collapse to "No error details returned." because the Node parser
+    ///   only reads <c>error</c> as a string. The most common Graph 403
+    ///   message is intentionally lost here. Fix would break parity tests.</item>
+    ///   <item>JSON <c>null</c> also returns "No error details returned." in
+    ///   .NET (parses as JsonValueKind.Null, no properties). Node's behavior
+    ///   on a bare <c>"null"</c> body is to return the raw text via the catch
+    ///   path; this is a tolerable divergence given that AAD never returns
+    ///   bare <c>null</c> bodies.</item>
+    /// </list></summary>
     internal static string SummarizeJsonError(string text)
     {
         try

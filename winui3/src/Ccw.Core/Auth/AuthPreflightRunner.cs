@@ -60,8 +60,22 @@ public sealed class AuthPreflightRunner
             }
             : new AuthPreflightCheck { Name = "EvalScore A2A MSAL auth", Status = AuthCheckStatus.Skipped, Message = "Not requested" });
 
-        var executed = checks.Any(c => c.Status != AuthCheckStatus.Skipped);
-        var passed = executed && checks.All(c => c.Status != AuthCheckStatus.Failed);
+        // OPUS I-3 / GPT I-4 — a user who explicitly asks for a WorkIQ /
+        // EvalScore check and gets a deferral-skip should NOT see the result
+        // flip from passed=true (Node) to passed=false (here) just because
+        // those engines aren't ported yet. The CLI exit-code contract is what
+        // scripts gate on. Treat the run as "passed" when no check FAILED,
+        // even if no check actually ran (the message stream still signals
+        // skip-with-deferral; consumers needing strict pass-only semantics
+        // can inspect Checks[].Status directly).
+        var passed = !checks.Any(c => c.Status == AuthCheckStatus.Failed);
+        // Preserve the Node-faithful semantic where "nothing executed AND
+        // nothing failed" is reported via Passed=false ONLY when the user
+        // didn't actually ask for anything (RunGraph/RunWorkIq/RunEvalScoreA2A
+        // all false). That path matches Node where empty-execution is the
+        // "no checks were executed; remove a skip-* option" failure mode.
+        var anythingRequested = options.RunGraph || options.RunWorkIq || options.RunEvalScoreA2A;
+        if (!anythingRequested) passed = false;
         return new AuthPreflightResult { Passed = passed, Checks = checks };
     }
 
@@ -136,14 +150,24 @@ public sealed class AuthPreflightRunner
         }
     }
 
-    /// <summary>Mirrors Node <c>sanitizeError</c>: redact client_secret=value
-    /// occurrences. Token endpoint sometimes echoes the form body in 400s.</summary>
+    /// <summary>Mirrors Node <c>sanitizeError</c>: redact client_secret values.
+    /// Covers both form-urlencoded <c>client_secret=value</c> (Node's only
+    /// case — that's what the AAD token endpoint echoes in 400s) AND JSON
+    /// shaped <c>"client_secret":"value"</c> (which .NET HttpClient may
+    /// surface in exception messages when callers log the request body —
+    /// a divergence from Node that errs on the safe side).</summary>
     internal static string SanitizeError(string message)
     {
-        return System.Text.RegularExpressions.Regex.Replace(
+        var s = System.Text.RegularExpressions.Regex.Replace(
             message,
             @"client_secret=[^&\s]+",
             "client_secret=<redacted>",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        s = System.Text.RegularExpressions.Regex.Replace(
+            s,
+            @"""client_secret""\s*:\s*""[^""]*""",
+            @"""client_secret"":""<redacted>""",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return s;
     }
 }

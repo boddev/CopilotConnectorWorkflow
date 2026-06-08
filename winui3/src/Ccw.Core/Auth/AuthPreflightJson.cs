@@ -22,6 +22,11 @@ public static class AuthPreflightJson
     private static readonly JsonSerializerOptions Options = new()
     {
         WriteIndented = true,
+        // OPUS B1 — STJ on .NET 9+ added a NewLine property that defaults to
+        // Environment.NewLine (CRLF on Windows). Node's JSON.stringify always
+        // emits "\n". Pin "\n" to keep byte-equality with Node output. A test
+        // asserts no "\r" appears in Serialize(result).
+        NewLine = "\n",
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
         Converters = { new AuthCheckStatusJsonConverter() },
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,

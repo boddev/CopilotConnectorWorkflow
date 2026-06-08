@@ -51,7 +51,12 @@ public static class JwtPayloadDecoder
             : standard.PadRight(((standard.Length + 3) / 4) * 4, '=');
 
         var bytes = Convert.FromBase64String(padded);
-        return JsonDocument.Parse(bytes).RootElement.Clone();
+        // OPUS B2 — JsonDocument.Parse returns a doc that owns a pooled byte
+        // buffer; the buffer is only returned to ArrayPool on Dispose. Clone()
+        // copies the element data but does NOT dispose the doc. We MUST
+        // dispose explicitly to avoid leaking a pooled buffer per call.
+        using var doc = JsonDocument.Parse(bytes);
+        return doc.RootElement.Clone();
     }
 
     /// <summary>Reads the <c>roles</c> claim as a list of strings, dropping

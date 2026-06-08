@@ -60,7 +60,39 @@ public sealed class AuthPreflightRunnerTests
         Assert.Contains("Not yet ported", workiq.Message);
         Assert.Equal(AuthCheckStatus.Skipped, evalscore.Status);
         Assert.Contains("Not yet ported", evalscore.Message);
-        Assert.False(result.Passed);
+        // Phase-3 closure-2 fold-in (Opus I-3 / GPT I-4): a deferral-skip
+        // for an EXPLICITLY-REQUESTED check must not flip Passed to false.
+        Assert.True(result.Passed);
+    }
+
+    [Fact]
+    public void Json_UsesLfNewlines_NotCrLf_ForByteParityWithNode()
+    {
+        // Opus B1 — STJ on .NET 9+ defaults to Environment.NewLine, which
+        // is CRLF on Windows. We pin "\n" to match Node JSON.stringify.
+        var result = new AuthPreflightResult
+        {
+            Passed = false,
+            Checks =
+            [
+                new AuthPreflightCheck { Name = "X", Status = AuthCheckStatus.Failed, Message = "boom" },
+            ],
+        };
+        var json = AuthPreflightJson.Serialize(result);
+        Assert.DoesNotContain("\r", json);
+        Assert.Contains("\n", json);
+    }
+
+    [Fact]
+    public void SanitizeError_RedactsJsonShapedClientSecret()
+    {
+        // GPT I-2 / Opus I-2: divergence-from-Node fold-in. Node only redacts
+        // form-urlencoded; we also redact JSON-shaped because .NET HttpClient
+        // exceptions can echo the request body in JSON form.
+        var msg = "request: {\"client_secret\":\"abc123\",\"grant_type\":\"client_credentials\"}";
+        var s = AuthPreflightRunner.SanitizeError(msg);
+        Assert.Contains("\"client_secret\":\"<redacted>\"", s);
+        Assert.DoesNotContain("abc123", s);
     }
 
     [Fact]
