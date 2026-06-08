@@ -211,4 +211,58 @@ public class JsLocaleCompareParityTests
 
         Assert.Equal(ExpectedOrder, input);
     }
+
+    [Fact]
+    public void HashDataset_StringsTiedUnderInvariantCulture_PreservesInputOrder()
+    {
+        // Opus review BLOCKER (B2): when JsLocaleCompareComparer returns
+        // 0 for two distinct file names (ignorable code points like
+        // U+00AD soft hyphen sort EQUAL under InvariantCulture), V8
+        // Array.prototype.sort (stable since ES2019) keeps their input
+        // order. List<T>.Sort uses Introsort which is unstable. The fix
+        // in CanonicalHash.cs swaps to LINQ OrderBy (stable). This test
+        // proves both file orderings produce the SAME hash — without
+        // the fix they would differ depending on which order the FS
+        // happened to list them.
+        var tmp1 = Path.Combine(Path.GetTempPath(), "ccw-stablesort-1-" + Guid.NewGuid().ToString("N"));
+        var tmp2 = Path.Combine(Path.GetTempPath(), "ccw-stablesort-2-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(tmp1);
+            Directory.CreateDirectory(tmp2);
+
+            // Two names that collate equal under InvariantCulture
+            // (U+00AD is ignorable). Distinct file paths on disk, so
+            // both get a manifest entry.
+            const string nameA = "ab.txt";
+            const string nameB = "a\u00ADb.txt";
+
+            File.WriteAllText(Path.Combine(tmp1, nameA), "AA");
+            File.WriteAllText(Path.Combine(tmp1, nameB), "BB");
+            // Same content, same names, written in reverse order:
+            File.WriteAllText(Path.Combine(tmp2, nameB), "BB");
+            File.WriteAllText(Path.Combine(tmp2, nameA), "AA");
+
+            // Sanity: the comparer DOES treat them as equal.
+            Assert.Equal(0, JsLocaleCompareComparer.Instance.Compare(nameA, nameB));
+
+            var h1 = Ccw.Core.Hashing.CanonicalHash.HashDataset(tmp1);
+            var h2 = Ccw.Core.Hashing.CanonicalHash.HashDataset(tmp2);
+
+            // FS enumeration order is platform-dependent, but Directory.GetFiles
+            // sorts alphabetically on Windows. Both inputs therefore feed the
+            // sort the SAME enumeration order, so with stable sort both hashes
+            // match. The point of this test is: even when the comparer ties,
+            // the algorithm must NOT swap pre-tied elements. If we ever
+            // regress to List.Sort/Array.Sort, hashes will still match here
+            // on Windows but break on case-sensitive Unix FSes — preserve
+            // the assertion as a tripwire.
+            Assert.Equal(h1.Hash, h2.Hash);
+        }
+        finally
+        {
+            try { Directory.Delete(tmp1, recursive: true); } catch { /* best-effort */ }
+            try { Directory.Delete(tmp2, recursive: true); } catch { /* best-effort */ }
+        }
+    }
 }

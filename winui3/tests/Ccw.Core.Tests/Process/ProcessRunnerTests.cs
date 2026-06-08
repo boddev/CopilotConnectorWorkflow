@@ -164,6 +164,88 @@ public class ProcessRunnerTests
         Assert.Equal(["-3", "-u"], args);
     }
 
+    [Fact]
+    public async Task RunAsync_EnvNullValue_RemovesVariableFromChild()
+    {
+        // GPT review IMPORTANT: Node `spawn({env:{KEY: undefined}})`
+        // removes KEY from the child environment. The C# port mirrors
+        // this by treating null in opts.Env as a removal.
+        Environment.SetEnvironmentVariable("CCW_TEST_PARENT_VAR", "from-parent");
+        try
+        {
+            // cmd.exe IF DEFINED branches reliably on whether a var
+            // exists in the child environment, regardless of value.
+            var opts = OnWindows
+                ? new RunOptions
+                {
+                    Cmd = "cmd.exe",
+                    Args = ["/c", "IF DEFINED CCW_TEST_PARENT_VAR (echo present) ELSE (echo absent)"],
+                    Env = new Dictionary<string, string?> { ["CCW_TEST_PARENT_VAR"] = null },
+                }
+                : new RunOptions
+                {
+                    Cmd = "/bin/sh",
+                    Args = ["-c", "if [ -z \"${CCW_TEST_PARENT_VAR+x}\" ]; then echo absent; else echo present; fi"],
+                    Env = new Dictionary<string, string?> { ["CCW_TEST_PARENT_VAR"] = null },
+                };
+
+            var result = await ProcessRunner.RunAsync(opts);
+            Assert.True(result.Ok);
+            Assert.Contains("absent", result.Output, StringComparison.Ordinal);
+            Assert.DoesNotContain("present", result.Output, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("CCW_TEST_PARENT_VAR", null);
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_Cancellation_CompletesLogSink()
+    {
+        // GPT review BLOCKER: a cancelled run must complete the sink
+        // so awaiting consumers (e.g. UI ReadAllAsync) wake up.
+        var channel = ProcessRunner.CreateLogChannel(capacity: 64);
+        using var cts = new CancellationTokenSource();
+
+        // A long-running noop process that we cancel almost immediately.
+        var opts = OnWindows
+            ? new RunOptions
+            {
+                Cmd = "cmd.exe",
+                Args = ["/c", "ping -n 30 127.0.0.1 > NUL"],
+                LogSink = channel.Writer,
+            }
+            : new RunOptions
+            {
+                Cmd = "/bin/sh",
+                Args = ["-c", "sleep 30"],
+                LogSink = channel.Writer,
+            };
+
+        var runTask = ProcessRunner.RunAsync(opts, cts.Token);
+        // Drain the channel in the background so the producer can't
+        // block on backpressure while we wait to cancel.
+        var drainTask = Task.Run(async () =>
+        {
+            await foreach (var _ in channel.Reader.ReadAllAsync(CancellationToken.None))
+            {
+            }
+        });
+
+        // Give the process a moment to actually start.
+        await Task.Delay(200);
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => runTask);
+
+        // The drain task should complete because the sink was completed
+        // in `finally`. If it hangs, this Task.WhenAny pattern will
+        // surface the bug as a timeout failure.
+        var winner = await Task.WhenAny(drainTask, Task.Delay(TimeSpan.FromSeconds(5)));
+        Assert.Same(drainTask, winner);
+    }
+
     private sealed class TempDir : IDisposable
     {
         public string Path { get; }

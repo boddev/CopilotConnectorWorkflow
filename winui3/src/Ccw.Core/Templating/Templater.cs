@@ -21,6 +21,7 @@
 //     Non-.hbs text files are also copied verbatim (no rendering).
 //   * `renderFileToDir` returns the absolute destination path.
 
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Ccw.Core.Templating;
@@ -86,7 +87,10 @@ public static class Templater
         ArgumentException.ThrowIfNullOrEmpty(destinationRelativePath);
         ArgumentNullException.ThrowIfNull(values);
 
-        var targetRel = destinationRelativePath.EndsWith(".hbs", StringComparison.OrdinalIgnoreCase)
+        // GPT review IMPORTANT: TS `endsWith('.hbs')` is case-sensitive.
+        // Use Ordinal (not OrdinalIgnoreCase) so a file named `foo.HBS`
+        // is treated as a verbatim copy, not a template — matches Node.
+        var targetRel = destinationRelativePath.EndsWith(".hbs", StringComparison.Ordinal)
             ? destinationRelativePath[..^4]
             : destinationRelativePath;
 
@@ -104,10 +108,22 @@ public static class Templater
         {
             File.Copy(sourceFile, dest, overwrite: true);
         }
-        else if (sourceFile.EndsWith(".hbs", StringComparison.OrdinalIgnoreCase))
+        else if (sourceFile.EndsWith(".hbs", StringComparison.Ordinal))
         {
-            var text = File.ReadAllText(sourceFile);
-            File.WriteAllText(dest, RenderString(text, values));
+            // Opus review I3: File.ReadAllText auto-strips a UTF-8 BOM
+            // (U+FEFF). Node's fs.readFileSync(p,'utf-8') PRESERVES it.
+            // For a BOM'd template, that's a 3-byte parity drift. Read
+            // raw bytes and decode without BOM stripping to match Node.
+            var raw = File.ReadAllBytes(sourceFile);
+            var text = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: false)
+                .GetString(raw);
+            var rendered = RenderString(text, values);
+
+            // Write back bytes; if the source had a BOM the rendered
+            // string still begins with U+FEFF (substitution never
+            // touches the BOM since {{key}} can't start with FEFF).
+            // We use NEW UTF8Encoding(false) -> no BOM written by us.
+            File.WriteAllBytes(dest, new UTF8Encoding(false).GetBytes(rendered));
         }
         else
         {

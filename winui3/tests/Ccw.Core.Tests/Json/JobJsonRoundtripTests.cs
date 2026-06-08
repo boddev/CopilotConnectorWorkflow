@@ -21,6 +21,30 @@ public class JobJsonRoundtripTests
         AppContext.BaseDirectory, "Fixtures");
 
     [Fact]
+    public void MetadataProvenance_FractionalFields_RoundtripWithoutTruncation()
+    {
+        // GPT review BLOCKER: TS `titleFromSource: number` is a 0..1
+        // fraction (round3(itemsWithSourceTitle / itemCount)). If we
+        // ever stored these as int, the JSON `0.6` would silently parse
+        // as `0` and re-emit as `0`, hiding real provenance signal.
+        const string json = """
+            {
+              "titleFromSource": 0.6,
+              "urlFromSource": 0.875,
+              "iconUrlFromSource": 0,
+              "schemaPropertiesPromotedToSearchable": 4,
+              "schemaPropertiesPromotedToRefinable": 2
+            }
+            """;
+
+        var rec = JsonSerializer.Deserialize<MetadataProvenance>(json, CcwJsonOptions.Pretty);
+        Assert.NotNull(rec);
+        Assert.Equal(0.6, rec.TitleFromSource);
+        Assert.Equal(0.875, rec.UrlFromSource);
+        Assert.Equal(0.0, rec.IconUrlFromSource);
+    }
+
+    [Fact]
     public void Roundtrip_BuildModeWithDetection_BytesMatchFixture()
     {
         var path = Path.Combine(FixturesDir, "job-build-mode-with-detection.json");

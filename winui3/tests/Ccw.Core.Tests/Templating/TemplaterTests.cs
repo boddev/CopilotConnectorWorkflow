@@ -181,6 +181,86 @@ public class TemplaterTests
         Assert.Equal("NGO Environment", File.ReadAllText(Path.Combine(dest, "keep.txt")));
     }
 
+    [Fact]
+    public void RenderFileToDir_HbsExtensionCaseSensitive_HBSTreatedAsVerbatim()
+    {
+        // GPT review IMPORTANT: TS `endsWith('.hbs')` is case-sensitive.
+        // A `.HBS` file must NOT be rendered or have its suffix
+        // stripped — it copies verbatim like any other text file.
+        using var tmp = new TempDir();
+        var srcPath = Path.Combine(tmp.Path, "raw.HBS");
+        File.WriteAllText(srcPath, "literal {{connectorName}} stays put");
+
+        var destDir = Path.Combine(tmp.Path, "out");
+        var dest = Templater.RenderFileToDir(srcPath, destDir, "raw.HBS", NgoValues);
+
+        Assert.EndsWith("raw.HBS", dest, StringComparison.Ordinal);
+        Assert.Equal("literal {{connectorName}} stays put", File.ReadAllText(dest));
+    }
+
+    [Fact]
+    public void RenderFileToDir_HbsExtensionLowercase_StripsAndRenders()
+    {
+        // Sibling assertion — lowercase .hbs IS rendered.
+        using var tmp = new TempDir();
+        var srcPath = Path.Combine(tmp.Path, "in.txt.hbs");
+        File.WriteAllText(srcPath, "{{connectorName}}");
+
+        var destDir = Path.Combine(tmp.Path, "out");
+        var dest = Templater.RenderFileToDir(srcPath, destDir, "in.txt.hbs", NgoValues);
+
+        Assert.EndsWith("in.txt", dest, StringComparison.Ordinal);
+        Assert.Equal("NGO Environment", File.ReadAllText(dest));
+    }
+
+    [Fact]
+    public void RenderFileToDir_HbsWithUtf8Bom_PreservesBomInOutput()
+    {
+        // Opus review I3: File.ReadAllText auto-strips the UTF-8 BOM
+        // (U+FEFF). Node `fs.readFileSync(p,'utf-8')` PRESERVES it. The
+        // Templater port reads raw bytes and decodes via UTF8Encoding(false)
+        // to keep the BOM in the rendered output — otherwise a BOM'd
+        // template (e.g. PowerShell scripts saved by older tooling)
+        // would produce a 3-byte parity drift versus the Node renderer.
+        using var tmp = new TempDir();
+        var srcPath = Path.Combine(tmp.Path, "with-bom.txt.hbs");
+        // Write source with explicit UTF-8 BOM + body that uses a key.
+        var bom = new byte[] { 0xEF, 0xBB, 0xBF };
+        var body = System.Text.Encoding.UTF8.GetBytes("Hello {{connectorName}}!");
+        File.WriteAllBytes(srcPath, bom.Concat(body).ToArray());
+
+        var destDir = Path.Combine(tmp.Path, "out");
+        var dest = Templater.RenderFileToDir(srcPath, destDir, "with-bom.txt.hbs", NgoValues);
+
+        var outBytes = File.ReadAllBytes(dest);
+        // First three bytes must be the BOM.
+        Assert.Equal(0xEF, outBytes[0]);
+        Assert.Equal(0xBB, outBytes[1]);
+        Assert.Equal(0xBF, outBytes[2]);
+        // And the substitution still happened.
+        var bodyText = System.Text.Encoding.UTF8.GetString(outBytes, 3, outBytes.Length - 3);
+        Assert.Equal("Hello NGO Environment!", bodyText);
+    }
+
+    [Fact]
+    public void RenderFileToDir_VerbatimWithUtf8Bom_PreservesBomInOutput()
+    {
+        // Non-.hbs files are copied byte-for-byte by File.Copy, which
+        // naturally preserves any BOM. Lock that behavior with a test
+        // so a future refactor to "read text then write text" can't
+        // regress us silently.
+        using var tmp = new TempDir();
+        var srcPath = Path.Combine(tmp.Path, "verbatim.bin");
+        var bom = new byte[] { 0xEF, 0xBB, 0xBF };
+        var body = System.Text.Encoding.UTF8.GetBytes("no substitution here");
+        File.WriteAllBytes(srcPath, bom.Concat(body).ToArray());
+
+        var destDir = Path.Combine(tmp.Path, "out");
+        var dest = Templater.RenderFileToDir(srcPath, destDir, "verbatim.bin", NgoValues);
+
+        Assert.Equal(File.ReadAllBytes(srcPath), File.ReadAllBytes(dest));
+    }
+
     private sealed class TempDir : IDisposable
     {
         public string Path { get; }

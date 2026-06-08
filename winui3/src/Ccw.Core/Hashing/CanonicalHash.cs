@@ -155,7 +155,16 @@ public static class CanonicalHash
             WalkDirectory(resolved, string.Empty, extFilter, entries);
         }
 
-        entries.Sort((a, b) => JsLocaleCompareComparer.Instance.Compare(a.RelativePath, b.RelativePath));
+        // Opus review BLOCKER (B2): List<T>.Sort is NOT stable. V8
+        // Array.prototype.sort has been STABLE since ES2019. For inputs
+        // whose comparer returns 0 on distinct elements (ignorable code
+        // points like U+00AD soft hyphen, zero-width chars, or values
+        // collated equal by ICU), input order must be preserved to match
+        // Node. LINQ OrderBy is documented stable; use it on the index
+        // path so the manifest line order is byte-identical to Node.
+        entries = entries
+            .OrderBy(e => e.RelativePath, JsLocaleCompareComparer.Instance)
+            .ToList();
 
         var sb = new StringBuilder();
         for (var i = 0; i < entries.Count; i++)
@@ -280,7 +289,10 @@ public static class CanonicalHash
             }
         }
 
-        canonical.Sort((a, b) => JsLocaleCompareComparer.Instance.Compare(a.Id, b.Id));
+        // Opus review BLOCKER (B2): stable sort — see HashDataset comment.
+        canonical = canonical
+            .OrderBy(c => c.Id, JsLocaleCompareComparer.Instance)
+            .ToList();
 
         var sb = new StringBuilder();
         for (var i = 0; i < canonical.Count; i++)

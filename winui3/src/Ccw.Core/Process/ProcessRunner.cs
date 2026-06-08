@@ -23,14 +23,28 @@
 //   * Windows .cmd/.bat shims auto-promote to shell=true.
 //   * env is merged on top of the current process environment
 //     (callers override; existing vars survive otherwise).
+//     A null value REMOVES that variable from the child environment
+//     (mirrors Node `spawn({env:{KEY: undefined}})`).
 //   * spawn failure -> exitCode = -1, ok = false.
 //   * Exit code propagates as-is (no exception thrown for non-zero).
 //
-// Channel<LogLine> uses BoundedChannelFullMode.Wait. A slow consumer
-// will pause the producer; in the limit, the child process's stdout
-// pipe fills its OS-level buffer and the OS blocks the child until
-// drained. This is the desired backpressure semantic for very chatty
-// long-running steps (Step 6 can emit hundreds of MB of log output).
+// CONCURRENCY DISCIPLINE (GPT review BLOCKER):
+//   * stdout + stderr pumps run concurrently. ALL shared-state writes
+//     (StringBuilder, log file, channel) are serialized through a
+//     single SemaphoreSlim so we never corrupt captured output, race
+//     on File.AppendAllTextAsync, or violate the channel's writer
+//     contract.
+//   * sink.Complete() is unconditionally invoked in `finally` so a
+//     cancelled run never leaves a UI consumer hanging on ReadAllAsync.
+//
+// BACKPRESSURE CONTRACT:
+//   * Channel<LogLine> uses BoundedChannelFullMode.Wait. Callers MUST
+//     consume the channel concurrently with awaiting RunAsync, or a
+//     chatty child will block (filling the channel -> blocking the
+//     producer -> blocking stdout drain -> OS pipe buffer fills ->
+//     blocking the child). This is the desired semantic for very chatty
+//     long-running steps (Step 6 emits hundreds of MB) — it provides
+//     real backpressure rather than unbounded buffering.
 
 using System.Diagnostics;
 using System.Globalization;
@@ -48,6 +62,10 @@ public sealed record RunOptions
     public required string Cmd { get; init; }
     public IReadOnlyList<string> Args { get; init; } = [];
     public string? Cwd { get; init; }
+
+    /// <summary>Env vars to merge over the current process environment.
+    /// A <c>null</c> value REMOVES that variable from the child env
+    /// (matches Node <c>spawn({ env: { KEY: undefined } })</c>).</summary>
     public IReadOnlyDictionary<string, string?>? Env { get; init; }
 
     /// <summary>Append all stdout/stderr to this file.</summary>
@@ -75,19 +93,30 @@ public sealed record RunResult
 
 public static class ProcessRunner
 {
-    /// <summary>Default channel capacity for the live log stream.
-    /// 4096 lines is enough for a chatty Step 6 to never starve the
-    /// producer in normal conditions; if the UI thread stalls
-    /// significantly, backpressure pauses the child process.</summary>
+    /// <summary>Default channel capacity for the live log stream.</summary>
     public const int DefaultLogChannelCapacity = 4096;
 
-    /// <summary>Create a bounded channel suitable for <see cref="RunOptions.LogSink"/>.</summary>
-    public static Channel<LogLine> CreateLogChannel(int capacity = DefaultLogChannelCapacity) =>
+    /// <summary>Create a bounded channel suitable for <see cref="RunOptions.LogSink"/>.
+    /// Defaults to <see cref="BoundedChannelFullMode.DropOldest"/> per Opus review I2:
+    /// the live UI sink is intentionally LOSSY. A stalled UI consumer must never
+    /// block the child process — a 60-minute Step 6 cannot be held hostage to a
+    /// blocked window. The lossless source of truth is the log file (always written)
+    /// and the <see cref="RunResult.Output"/> string (always captured). Pass
+    /// <see cref="BoundedChannelFullMode.Wait"/> if you genuinely need backpressure
+    /// (test harnesses, deterministic captures).</summary>
+    public static Channel<LogLine> CreateLogChannel(
+        int capacity = DefaultLogChannelCapacity,
+        BoundedChannelFullMode fullMode = BoundedChannelFullMode.DropOldest) =>
         Channel.CreateBounded<LogLine>(new BoundedChannelOptions(capacity)
         {
-            FullMode = BoundedChannelFullMode.Wait,
+            FullMode = fullMode,
+            // Two pump tasks (stdout + stderr) both write through the
+            // serializing semaphore — SingleWriter would be a lie even
+            // though only one task is inside the semaphore at a time,
+            // because the channel's invariant is about distinct callers,
+            // not serialized callers. Keep this honest.
             SingleReader = false,
-            SingleWriter = true,
+            SingleWriter = false,
         });
 
     /// <summary>Spawn a child process; tee output to log file + sink; complete when done.</summary>
@@ -97,129 +126,151 @@ public static class ProcessRunner
         ArgumentException.ThrowIfNullOrEmpty(opts.Cmd);
 
         var cwd = opts.Cwd ?? Environment.CurrentDirectory;
-
-        if (!string.IsNullOrEmpty(opts.LogFile))
-        {
-            var logDir = Path.GetDirectoryName(opts.LogFile);
-            if (!string.IsNullOrEmpty(logDir))
-            {
-                Directory.CreateDirectory(logDir);
-            }
-
-            var header = string.Create(CultureInfo.InvariantCulture,
-                $"\n$ {opts.Cmd} {string.Join(' ', opts.Args)}\n  (cwd={cwd})\n");
-            await File.AppendAllTextAsync(opts.LogFile, header, Encoding.UTF8, cancellationToken)
-                .ConfigureAwait(false);
-        }
-
-        var isWindowsShim = OperatingSystem.IsWindows()
-            && (opts.Cmd.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase)
-                || opts.Cmd.EndsWith(".bat", StringComparison.OrdinalIgnoreCase));
-
-        var useShell = opts.Shell || isWindowsShim;
-
-        var psi = new ProcessStartInfo
-        {
-            FileName = useShell ? GetShellExecutable() : opts.Cmd,
-            WorkingDirectory = cwd,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8,
-        };
-
-        if (useShell)
-        {
-            // Mirror Node's `spawn(cmd, args, { shell: true })` behavior on
-            // Windows: cmd.exe /d /s /c "<cmd> <args>".
-            psi.ArgumentList.Add("/d");
-            psi.ArgumentList.Add("/s");
-            psi.ArgumentList.Add("/c");
-            psi.ArgumentList.Add(BuildShellCommand(opts.Cmd, opts.Args));
-        }
-        else
-        {
-            foreach (var arg in opts.Args)
-            {
-                psi.ArgumentList.Add(arg);
-            }
-        }
-
-        if (opts.Env is not null)
-        {
-            foreach (var (key, value) in opts.Env)
-            {
-                psi.Environment[key] = value;
-            }
-        }
-
-        var captured = new StringBuilder();
         var sink = opts.LogSink;
-
-        using var child = new System.Diagnostics.Process { StartInfo = psi };
-
-        try
-        {
-            if (!child.Start())
-            {
-                throw new InvalidOperationException("Process.Start returned false.");
-            }
-        }
-        catch (Exception ex)
-        {
-            var spawnText = $"\n[spawn error] {ex.Message}\n";
-            captured.Append(spawnText);
-            await WriteAsync(opts.LogFile, sink, opts.Label, spawnText, cancellationToken).ConfigureAwait(false);
-            sink?.Complete();
-            return new RunResult { ExitCode = -1, Ok = false, Output = captured.ToString() };
-        }
-
-        var stdoutTask = PumpAsync(child.StandardOutput, captured, opts.LogFile, sink, opts.Label, cancellationToken);
-        var stderrTask = PumpAsync(child.StandardError, captured, opts.LogFile, sink, opts.Label, cancellationToken);
+        // Single semaphore serializes ALL shared-state writes across
+        // the two pump tasks (stdout + stderr).
+        using var writeGate = new SemaphoreSlim(1, 1);
+        var captured = new StringBuilder();
 
         try
         {
-            await child.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            try
+            if (!string.IsNullOrEmpty(opts.LogFile))
             {
-                if (!child.HasExited)
+                var logDir = Path.GetDirectoryName(opts.LogFile);
+                if (!string.IsNullOrEmpty(logDir))
                 {
-                    child.Kill(entireProcessTree: true);
+                    Directory.CreateDirectory(logDir);
+                }
+
+                var header = string.Create(CultureInfo.InvariantCulture,
+                    $"\n$ {opts.Cmd} {string.Join(' ', opts.Args)}\n  (cwd={cwd})\n");
+                await File.AppendAllTextAsync(opts.LogFile, header, Encoding.UTF8, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            var isWindowsShim = OperatingSystem.IsWindows()
+                && (opts.Cmd.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase)
+                    || opts.Cmd.EndsWith(".bat", StringComparison.OrdinalIgnoreCase));
+
+            var useShell = opts.Shell || isWindowsShim;
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = useShell ? GetShellExecutable() : opts.Cmd,
+                WorkingDirectory = cwd,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8,
+            };
+
+            if (useShell)
+            {
+                psi.ArgumentList.Add("/d");
+                psi.ArgumentList.Add("/s");
+                psi.ArgumentList.Add("/c");
+                psi.ArgumentList.Add(BuildShellCommand(opts.Cmd, opts.Args));
+            }
+            else
+            {
+                foreach (var arg in opts.Args)
+                {
+                    psi.ArgumentList.Add(arg);
                 }
             }
-            catch
+
+            if (opts.Env is not null)
             {
-                // Best-effort kill; rethrow the cancellation.
+                foreach (var (key, value) in opts.Env)
+                {
+                    if (value is null)
+                    {
+                        // Null = remove. Mirrors Node.
+                        psi.Environment.Remove(key);
+                    }
+                    else
+                    {
+                        psi.Environment[key] = value;
+                    }
+                }
             }
 
-            throw;
+            using var child = new System.Diagnostics.Process { StartInfo = psi };
+
+            try
+            {
+                if (!child.Start())
+                {
+                    throw new InvalidOperationException("Process.Start returned false.");
+                }
+            }
+            catch (Exception ex)
+            {
+                var spawnText = $"\n[spawn error] {ex.Message}\n";
+                captured.Append(spawnText);
+                await WriteAsync(opts.LogFile, sink, opts.Label, spawnText, writeGate, cancellationToken)
+                    .ConfigureAwait(false);
+                return new RunResult { ExitCode = -1, Ok = false, Output = captured.ToString() };
+            }
+
+            var stdoutTask = PumpAsync(child.StandardOutput, captured, opts.LogFile, sink, opts.Label, writeGate, cancellationToken);
+            var stderrTask = PumpAsync(child.StandardError, captured, opts.LogFile, sink, opts.Label, writeGate, cancellationToken);
+
+            try
+            {
+                await child.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                try
+                {
+                    if (!child.HasExited)
+                    {
+                        child.Kill(entireProcessTree: true);
+                        // Wait without the cancellation token; we just
+                        // need the OS to reap. Bounded grace period.
+                        await child.WaitForExitAsync(CancellationToken.None)
+                            .WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None)
+                            .ConfigureAwait(false);
+                    }
+                }
+                catch
+                {
+                    // Best-effort cleanup; cancellation rethrow below.
+                }
+
+                await SafeAwait(stdoutTask).ConfigureAwait(false);
+                await SafeAwait(stderrTask).ConfigureAwait(false);
+
+                throw;
+            }
+
+            await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
+
+            var exitCode = child.ExitCode;
+            var tail = string.Create(CultureInfo.InvariantCulture, $"\n[exit {exitCode}]\n");
+            await WriteAsync(opts.LogFile, sink, opts.Label, tail, writeGate, cancellationToken)
+                .ConfigureAwait(false);
+
+            return new RunResult
+            {
+                ExitCode = exitCode,
+                Ok = exitCode == 0,
+                Output = captured.ToString(),
+            };
         }
-
-        await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
-
-        var exitCode = child.ExitCode;
-        var tail = string.Create(CultureInfo.InvariantCulture, $"\n[exit {exitCode}]\n");
-        await WriteAsync(opts.LogFile, sink, opts.Label, tail, cancellationToken).ConfigureAwait(false);
-
-        sink?.Complete();
-
-        return new RunResult
+        finally
         {
-            ExitCode = exitCode,
-            Ok = exitCode == 0,
-            // Node returns the BODY (no spawn-error suffix) and no tail in `output`.
-            // Match that: `captured` holds bytes received before the tail write.
-            Output = captured.ToString(),
-        };
+            // Always complete the sink so awaiting consumers wake up,
+            // even on cancellation or unexpected exception
+            // (GPT BLOCKER fix). TryComplete is a no-op if already done.
+            sink?.TryComplete();
+        }
     }
 
-    /// <summary>Split a "py -3" style invocation into command + prefix args.
-    /// TS: <c>splitInvocation</c>.</summary>
+    /// <summary>Split a "py -3" style invocation into command + prefix args.</summary>
     public static (string Cmd, string[] PrefixArgs) SplitInvocation(string invocation)
     {
         ArgumentException.ThrowIfNullOrEmpty(invocation);
@@ -233,11 +284,9 @@ public static class ProcessRunner
         string? logFile,
         ChannelWriter<LogLine>? sink,
         string? label,
+        SemaphoreSlim writeGate,
         CancellationToken ct)
     {
-        // ReadAsync gives us byte-faithful chunks (matches Node's `data`
-        // event semantics, which fires per-chunk not per-line). Reading
-        // line-by-line would strip terminators and reformat the log.
         var buf = new char[4096];
         while (!ct.IsCancellationRequested)
         {
@@ -248,8 +297,25 @@ public static class ProcessRunner
             }
 
             var text = new string(buf, 0, read);
-            captured.Append(text);
-            await WriteAsync(logFile, sink, label, text, ct).ConfigureAwait(false);
+            await writeGate.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                captured.Append(text);
+
+                if (!string.IsNullOrEmpty(logFile))
+                {
+                    await File.AppendAllTextAsync(logFile, text, Encoding.UTF8, ct).ConfigureAwait(false);
+                }
+
+                if (sink is not null)
+                {
+                    await sink.WriteAsync(new LogLine(label, text), ct).ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                writeGate.Release();
+            }
         }
     }
 
@@ -258,17 +324,32 @@ public static class ProcessRunner
         ChannelWriter<LogLine>? sink,
         string? label,
         string text,
+        SemaphoreSlim writeGate,
         CancellationToken ct)
     {
-        if (!string.IsNullOrEmpty(logFile))
+        await writeGate.WaitAsync(ct).ConfigureAwait(false);
+        try
         {
-            await File.AppendAllTextAsync(logFile, text, Encoding.UTF8, ct).ConfigureAwait(false);
-        }
+            if (!string.IsNullOrEmpty(logFile))
+            {
+                await File.AppendAllTextAsync(logFile, text, Encoding.UTF8, ct).ConfigureAwait(false);
+            }
 
-        if (sink is not null)
-        {
-            await sink.WriteAsync(new LogLine(label, text), ct).ConfigureAwait(false);
+            if (sink is not null)
+            {
+                await sink.WriteAsync(new LogLine(label, text), ct).ConfigureAwait(false);
+            }
         }
+        finally
+        {
+            writeGate.Release();
+        }
+    }
+
+    private static async Task SafeAwait(Task t)
+    {
+        try { await t.ConfigureAwait(false); }
+        catch { /* drained on cancellation */ }
     }
 
     private static string GetShellExecutable() =>

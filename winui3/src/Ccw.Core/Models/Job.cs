@@ -84,9 +84,14 @@ public sealed record ScoreConfig
 /// <summary>Metadata provenance counts. TS: anonymous nested type in <c>ScoredReport.metadataProvenance</c>.</summary>
 public sealed record MetadataProvenance
 {
-    [JsonPropertyOrder(0)] public required int TitleFromSource { get; init; }
-    [JsonPropertyOrder(1)] public required int UrlFromSource { get; init; }
-    [JsonPropertyOrder(2)] public required int IconUrlFromSource { get; init; }
+    // BLOCKER fix from GPT review: TS `number` here is a 0..1 fraction
+    // (round3(itemsWithSourceTitle / itemCount) in identity-transform.ts),
+    // not an integer. Using `int` would silently truncate every
+    // metadata-provenance count to 0 on round-trip from a real Node
+    // ScoredReport.
+    [JsonPropertyOrder(0)] public required double TitleFromSource { get; init; }
+    [JsonPropertyOrder(1)] public required double UrlFromSource { get; init; }
+    [JsonPropertyOrder(2)] public required double IconUrlFromSource { get; init; }
     [JsonPropertyOrder(3)] public required int SchemaPropertiesPromotedToSearchable { get; init; }
     [JsonPropertyOrder(4)] public required int SchemaPropertiesPromotedToRefinable { get; init; }
 }
