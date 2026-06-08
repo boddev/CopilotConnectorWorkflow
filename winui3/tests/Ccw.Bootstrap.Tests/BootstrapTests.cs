@@ -31,6 +31,18 @@ public sealed class SemverCompareTests
         Assert.Equal(0, DependencyProbes.SemverCompare("22.21", "22.21.0"));
         Assert.True(DependencyProbes.SemverCompare("22.21.1", "22.21") > 0);
     }
+
+    [Theory]
+    [InlineData("22.21.1-rc.1", "22.21.1", -1)]
+    [InlineData("22.21.1", "22.21.1-rc.1", 1)]
+    [InlineData("22.21.1-alpha", "22.21.1-beta", -1)]
+    [InlineData("22.21.1+build.7", "22.21.1+build.99", 0)]
+    [InlineData("22.21.1-rc.1+build.7", "22.21.1-rc.1", 0)]
+    public void SemverCompare_PrereleaseRanksLower(string a, string b, int expectedSign)
+    {
+        var result = DependencyProbes.SemverCompare(a, b);
+        Assert.Equal(Math.Sign(expectedSign), Math.Sign(result));
+    }
 }
 
 public sealed class SiblingRepoProbeTests

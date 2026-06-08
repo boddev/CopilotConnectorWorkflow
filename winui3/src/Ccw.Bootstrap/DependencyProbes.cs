@@ -66,17 +66,20 @@ public static class DependencyProbes
     public const string MinNodeVersion = "22.21.1";
 
     /// <summary>Run every probe and return results in catalog order.</summary>
+    /// <remarks>GPT NIT 9: gh is hoisted out of ProbeGhCopilotExtension to avoid
+    /// running it twice — the extension probe accepts a cached result.</remarks>
     public static IReadOnlyList<DependencyProbeResult> ProbeAll(BootstrapOptions? options = null)
     {
         options ??= new BootstrapOptions();
+        var gh = ProbeGh();
         return new[]
         {
             ProbeNode(),
             ProbeGit(),
             ProbeAzureCli(),
             ProbeAtk(),
-            ProbeGh(),
-            ProbeGhCopilotExtension(),
+            gh,
+            ProbeGhCopilotExtension(gh),
             ProbeEvaluationCli(options),
             ProbeCopilotConnectorSkill(options),
         };
@@ -122,7 +125,8 @@ public static class DependencyProbes
 
     public static DependencyProbeResult ProbeAzureCli()
     {
-        var (ok, path, version) = TryRunForVersion("az", "--version");
+        // Opus NIT 4: az --version is slow-cold (often 8-12s); give it 20s.
+        var (ok, path, version) = TryRunForVersion("az", "--version", timeoutMs: 20000);
         return new DependencyProbeResult
         {
             Name = "az",
@@ -170,9 +174,9 @@ public static class DependencyProbes
     /// <summary>The GitHub Copilot CLI is a `gh` extension, not a top-level
     /// binary (Opus N5). Distinguishes 'gh missing' from 'gh present /
     /// extension missing' so the wizard can chain the right install.</summary>
-    public static DependencyProbeResult ProbeGhCopilotExtension()
+    public static DependencyProbeResult ProbeGhCopilotExtension(DependencyProbeResult? cachedGh = null)
     {
-        var ghProbe = ProbeGh();
+        var ghProbe = cachedGh ?? ProbeGh();
         if (!ghProbe.Present)
         {
             return new DependencyProbeResult
@@ -245,9 +249,9 @@ public static class DependencyProbes
 
     // ----- helpers -----------------------------------------------------
 
-    private static (bool Ok, string? Path, string? Version) TryRunForVersion(string fileName, string arg)
+    private static (bool Ok, string? Path, string? Version) TryRunForVersion(string fileName, string arg, int timeoutMs = 15000)
     {
-        var (ok, path, output) = TryRunCapturingOutput(fileName, arg);
+        var (ok, path, output) = TryRunCapturingOutput(fileName, arg, timeoutMs);
         if (!ok || string.IsNullOrEmpty(output)) return (ok, path, null);
         // Take the first line of output as version. Most CLIs print
         // "<name> <semver>"; we lose precision but it's fine for display.
@@ -255,30 +259,72 @@ public static class DependencyProbes
         return (true, path, firstLine);
     }
 
-    private static (bool Ok, string? Path, string? Output) TryRunCapturingOutput(string fileName, string args)
+    /// <summary>GPT BLOCKER #1: replaced the original sync ReadToEnd before
+    /// WaitForExit pattern with a concurrent read + WaitForExitAsync race
+    /// against a CancellationTokenSource timeout. Kills the process tree on
+    /// timeout. Also closes stdin (Opus NIT) so tools that block on input
+    /// surface as a quick failure instead of a hang.
+    ///
+    /// GPT BLOCKER #2: detects .cmd/.bat shims (e.g. npm.cmd) and promotes
+    /// to `cmd /c "<path>" <args>` because Process.Start can't launch a
+    /// .cmd directly with UseShellExecute=false.</summary>
+    internal static (bool Ok, string? Path, string? Output) TryRunCapturingOutput(string fileName, string args, int timeoutMs = 15000)
     {
         try
         {
-            // Resolve via PATH first so we get the path back for display.
             var resolved = WhichOnPath(fileName);
-            var psi = new ProcessStartInfo
+            var actual = resolved ?? fileName;
+            var ext = Path.GetExtension(actual);
+            var isCmdShim = ext.Equals(".cmd", StringComparison.OrdinalIgnoreCase)
+                         || ext.Equals(".bat", StringComparison.OrdinalIgnoreCase);
+            ProcessStartInfo psi;
+            if (isCmdShim)
             {
-                FileName = resolved ?? fileName,
-                Arguments = args,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
+                psi = new ProcessStartInfo
+                {
+                    FileName = "cmd.exe",
+                    Arguments = "/c \"\"" + actual + "\" " + args + "\"",
+                    RedirectStandardInput = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+            }
+            else
+            {
+                psi = new ProcessStartInfo
+                {
+                    FileName = actual,
+                    Arguments = args,
+                    RedirectStandardInput = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+            }
             using var p = Process.Start(psi);
             if (p is null) return (false, null, null);
-            var stdout = p.StandardOutput.ReadToEnd();
-            var stderr = p.StandardError.ReadToEnd();
-            if (!p.WaitForExit(8000))
+            try { p.StandardInput.Close(); } catch { /* best-effort */ }
+
+            // Concurrent reads so a full stderr buffer can't deadlock waiting on stdout.
+            var stdoutTask = p.StandardOutput.ReadToEndAsync();
+            var stderrTask = p.StandardError.ReadToEndAsync();
+            using var cts = new System.Threading.CancellationTokenSource(timeoutMs);
+            var waitTask = p.WaitForExitAsync(cts.Token);
+            try
+            {
+                waitTask.GetAwaiter().GetResult();
+            }
+            catch (OperationCanceledException)
             {
                 try { p.Kill(true); } catch { /* best-effort */ }
                 return (false, resolved, null);
             }
+            string stdout, stderr;
+            try { stdout = stdoutTask.GetAwaiter().GetResult(); } catch { stdout = ""; }
+            try { stderr = stderrTask.GetAwaiter().GetResult(); } catch { stderr = ""; }
             if (p.ExitCode != 0) return (false, resolved, null);
             return (true, resolved, string.IsNullOrEmpty(stdout) ? stderr : stdout);
         }
@@ -328,11 +374,17 @@ public static class DependencyProbes
 
     /// <summary>Compare two semver-ish strings. Tolerant of "v" prefixes,
     /// missing patch numbers, and the messy "1.42.0 (extra junk)" formats
-    /// some CLIs print. Returns &lt;0, 0, &gt;0 like a comparator.</summary>
+    /// some CLIs print. Returns &lt;0, 0, &gt;0 like a comparator.
+    ///
+    /// Opus + GPT IMPORTANT: when major.minor.patch tie, ranks pre-release
+    /// (e.g. "22.21.1-rc.1") strictly lower than the release ("22.21.1").
+    /// Build metadata after `+` is dropped entirely per semver spec.</summary>
     public static int SemverCompare(string a, string b)
     {
-        var ma = s_versionDigits.Match(a ?? "");
-        var mb = s_versionDigits.Match(b ?? "");
+        var sa = StripBuildMetadata(a ?? "");
+        var sb = StripBuildMetadata(b ?? "");
+        var ma = s_versionDigits.Match(sa);
+        var mb = s_versionDigits.Match(sb);
         var pa = (ma.Success ? ma.Value : "0").Split('.');
         var pb = (mb.Success ? mb.Value : "0").Split('.');
         for (var i = 0; i < 3; i++)
@@ -341,7 +393,31 @@ public static class DependencyProbes
             var bx = i < pb.Length && int.TryParse(pb[i], out var bv) ? bv : 0;
             if (ax != bx) return ax - bx;
         }
-        return 0;
+        var preA = ExtractPrerelease(sa, ma);
+        var preB = ExtractPrerelease(sb, mb);
+        // No prerelease ranks higher than a prerelease per semver.
+        if (preA is null && preB is null) return 0;
+        if (preA is null) return 1;
+        if (preB is null) return -1;
+        return string.CompareOrdinal(preA, preB);
+    }
+
+    private static string StripBuildMetadata(string v)
+    {
+        var plus = v.IndexOf('+', StringComparison.Ordinal);
+        return plus < 0 ? v : v[..plus];
+    }
+
+    private static string? ExtractPrerelease(string version, Match digitsMatch)
+    {
+        if (!digitsMatch.Success) return null;
+        var after = version[(digitsMatch.Index + digitsMatch.Length)..];
+        if (after.StartsWith('-'))
+        {
+            var end = after.IndexOfAny([' ', '\t']);
+            return end < 0 ? after[1..] : after[1..end];
+        }
+        return null;
     }
 }
 

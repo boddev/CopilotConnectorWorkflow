@@ -118,6 +118,20 @@ public static class SiblingRepoHelper
                 };
             }
         }
+        // GPT IMPORTANT #5: re-probe post-condition to confirm the markers
+        // landed. A clean npm-install exit code doesn't guarantee dist/index.js exists.
+        var postProbe = DependencyProbes.ProbeEvaluationCli(options);
+        if (!postProbe.Present)
+        {
+            return new SiblingRepoResult
+            {
+                RepoName = "EvaluationCLI",
+                Success = false,
+                CloneOutput = cloneOut.ToString(),
+                BuildOutput = buildOut.ToString(),
+                Error = "npm completed but expected dist/index.js markers are missing.",
+            };
+        }
         return new SiblingRepoResult
         {
             RepoName = "EvaluationCLI",
@@ -167,8 +181,19 @@ public static class SiblingRepoHelper
             }
         }
         // Skill bundle doesn't need a `npm run build` — Step 4 vendors the
-        // TS source file directly. Just verifying the SKILL.md marker is
-        // present (done by ProbeCopilotConnectorSkill).
+        // TS source file directly. Re-probe SKILL.md marker to confirm
+        // (GPT IMPORTANT #5: don't trust git clone exit alone).
+        var postProbe = DependencyProbes.ProbeCopilotConnectorSkill(options);
+        if (!postProbe.Present)
+        {
+            return new SiblingRepoResult
+            {
+                RepoName = "CopilotConnectorSkill",
+                Success = false,
+                CloneOutput = cloneOut.ToString(),
+                Error = "git clone completed but SKILL.md marker is missing at " + root + ".",
+            };
+        }
         return new SiblingRepoResult
         {
             RepoName = "CopilotConnectorSkill",
@@ -182,20 +207,61 @@ public static class SiblingRepoHelper
         IProgress<string>? progress, CancellationToken ct)
     {
         var resolved = DependencyProbes.WhichOnPath(fileName) ?? fileName;
-        var psi = new ProcessStartInfo
+        var ext = Path.GetExtension(resolved);
+        var isCmdShim = ext.Equals(".cmd", StringComparison.OrdinalIgnoreCase)
+                     || ext.Equals(".bat", StringComparison.OrdinalIgnoreCase);
+        ProcessStartInfo psi;
+        if (isCmdShim)
         {
-            FileName = resolved,
-            WorkingDirectory = workingDir,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
-        foreach (var a in args) psi.ArgumentList.Add(a);
+            // GPT BLOCKER #2: npm.cmd / others can't Process.Start directly with
+            // UseShellExecute=false. Wrap in cmd /c, manually quoting the path
+            // and each arg.
+            var quoted = new StringBuilder();
+            quoted.Append("/c \"\"").Append(resolved).Append('"');
+            foreach (var a in args)
+            {
+                quoted.Append(' ');
+                if (a.Contains(' ', StringComparison.Ordinal) || a.Contains('"', StringComparison.Ordinal))
+                {
+                    quoted.Append('"').Append(a.Replace("\"", "\\\"", StringComparison.Ordinal)).Append('"');
+                }
+                else
+                {
+                    quoted.Append(a);
+                }
+            }
+            quoted.Append('"');
+            psi = new ProcessStartInfo
+            {
+                FileName = "cmd.exe",
+                Arguments = quoted.ToString(),
+                WorkingDirectory = workingDir,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+        }
+        else
+        {
+            psi = new ProcessStartInfo
+            {
+                FileName = resolved,
+                WorkingDirectory = workingDir,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            foreach (var a in args) psi.ArgumentList.Add(a);
+        }
         try
         {
             using var p = Process.Start(psi);
             if (p is null) return (false, "");
+            try { p.StandardInput.Close(); } catch { /* best-effort */ }
             var stdoutTask = p.StandardOutput.ReadToEndAsync(ct);
             var stderrTask = p.StandardError.ReadToEndAsync(ct);
             await p.WaitForExitAsync(ct).ConfigureAwait(false);

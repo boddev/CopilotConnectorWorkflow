@@ -96,18 +96,27 @@ internal static class RunCommand
 
         var forceStepsList = forceSteps; // capture for the options closure
 
-        var pipeline = await Orchestrator.RunPipelineAsync(new RunPipelineOptions
+        JobRecord pipeline;
+        try
         {
-            Job = job,
-            StepEngines = DefaultStepEngines.Build(),
-            LogSink = logChannel.Writer,
-            ForceAll = args.Bool("force"),
-            ForceSteps = forceStepsList,
-            StartAt = startAt,
-            StopAfter = stopAfter,
-        }, JobStore.SaveJob, ct).ConfigureAwait(false);
-
-        logChannel.Writer.TryComplete();
+            pipeline = await Orchestrator.RunPipelineAsync(new RunPipelineOptions
+            {
+                Job = job,
+                StepEngines = DefaultStepEngines.Build(),
+                LogSink = logChannel.Writer,
+                ForceAll = args.Bool("force"),
+                ForceSteps = forceStepsList,
+                StartAt = startAt,
+                StopAfter = stopAfter,
+            }, JobStore.SaveJob, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            // GPT IMPORTANT #3 (Phase 4.5 closure): always close the channel so
+            // the drain task completes — covers cancellation + exception paths
+            // where the orchestrator never returned to the line below.
+            logChannel.Writer.TryComplete();
+        }
         await drainTask.ConfigureAwait(false);
 
         return pipeline.Status == JobStatus.Done ? 0 : 1;

@@ -1,0 +1,77 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Phase 5 — WinUI 3 head for the CopilotConnectorWorkflow native port.
+    Mirrors the eval-ui-winui3 sibling: .NET 10 + Windows App SDK 2.1.x,
+    self-contained runtime + WinAppSDK, packaged as single-project MSIX
+    (Phase 7). Unpackaged local F5 / dotnet build / dotnet run works
+    because WindowsPackageType defaults to None — the packaging slice
+    flips it to MSIX on release builds.
+
+    DisableXamlGeneratedMain=true so Program.cs owns [STAThread] Main.
+    We need to register the AppInstance single-instance lock BEFORE the
+    XAML runtime spins up so a double-click on a `.ccwjob` file lands
+    on the already-running window rather than spawning a duplicate
+    (plan §5g).
+  -->
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RootNamespace>Ccw.UI</RootNamespace>
+    <AssemblyName>CcwUI</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Platforms>x64;arm64</Platforms>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+
+    <UseWinUI>true</UseWinUI>
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <WindowsPackageType>None</WindowsPackageType>
+
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>preview</LangVersion>
+
+    <DisableXamlGeneratedMain>true</DisableXamlGeneratedMain>
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+
+    <!-- DI-style services intentionally instance-based (constructed by ServiceContainer); CA1822 noise. -->
+    <NoWarn>$(NoWarn);CA1822</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" />
+    <PackageReference Include="CommunityToolkit.Mvvm" />
+    <PackageReference Include="Markdig" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Ccw.Core\Ccw.Core.csproj" />
+    <ProjectReference Include="..\Ccw.Steps\Ccw.Steps.csproj" />
+    <ProjectReference Include="..\Ccw.Bootstrap\Ccw.Bootstrap.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Manifest Include="$(ApplicationManifest)" />
+  </ItemGroup>
+
+  <!-- Phase 7 MSIX wiring (mirrors sibling — only active when packaging). -->
+  <ItemGroup Condition="'$(WindowsPackageType)'=='MSIX'">
+    <AppxManifest Include="Package.appxmanifest">
+      <SubType>Designer</SubType>
+    </AppxManifest>
+  </ItemGroup>
+
+  <PropertyGroup Condition="'$(WindowsPackageType)'=='MSIX'">
+    <GenerateAppxPackageOnBuild>true</GenerateAppxPackageOnBuild>
+    <AppxPackageSigningEnabled>false</AppxPackageSigningEnabled>
+    <AppxBundle>Never</AppxBundle>
+    <AppxPackageDir>$(MSBuildProjectDirectory)\AppPackages\</AppxPackageDir>
+  </PropertyGroup>
+
+</Project>

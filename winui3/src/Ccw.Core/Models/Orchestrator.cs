@@ -143,6 +143,17 @@ public static class Orchestrator
             var outDir = Path.Combine(job.Workspace, StepOutDirName(name));
             Directory.CreateDirectory(outDir);
 
+            // GPT IMPORTANT #8 (Phase 5 readiness): persist Running state BEFORE
+            // invoking the engine so the UI can show "current step" by reading
+            // job.json. The Node app does the same.
+            var stepStartIso = NowIso();
+            job = saveJob(job.WithStep(name, prev => new StepRecord
+            {
+                Name = name,
+                Status = StepStatus.Running,
+                StartedAt = stepStartIso,
+            }));
+
             var ctx = new StepRunContextLike
             {
                 Job = job,
@@ -163,6 +174,7 @@ public static class Orchestrator
                 {
                     Name = name,
                     Status = StepStatus.Failed,
+                    StartedAt = stepStartIso,
                     ErrorMessage = ex.Message,
                     EndedAt = NowIso(),
                 }) with { Status = JobStatus.Failed });
@@ -175,7 +187,7 @@ public static class Orchestrator
             {
                 Name = name,
                 Status = result.Status,
-                StartedAt = result.StartedAt,
+                StartedAt = result.StartedAt ?? stepStartIso,
                 EndedAt = result.EndedAt ?? NowIso(),
                 ExitCode = result.ExitCode,
                 Outputs = result.Outputs is null ? null : new Dictionary<string, string>(result.Outputs),

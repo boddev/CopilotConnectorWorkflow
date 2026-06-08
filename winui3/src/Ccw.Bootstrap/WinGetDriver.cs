@@ -24,8 +24,20 @@ public sealed record WinGetInstallResult
 {
     public required bool Success { get; init; }
     public required int ExitCode { get; init; }
+    /// <summary>True when the install exited with a "package already installed"
+    /// status (Opus IMPORTANT). UI surfaces this as a no-op success.</summary>
+    public bool AlreadyInstalled { get; init; }
     public string? Output { get; init; }
     public string? Error { get; init; }
+}
+
+/// <summary>WinGet exit codes we treat as effectively-successful. See
+/// <see href="https://github.com/microsoft/winget-cli/blob/master/doc/windows/package-manager/winget/returnCodes.md"/>.</summary>
+internal static class WinGetExitCodes
+{
+    public const int AlreadyInstalled = unchecked((int)0x8A15002B);
+    public const int NoApplicableUpgrade = unchecked((int)0x8A15010B);
+    public const int UpdateNotApplicable = unchecked((int)0x8A150019);
 }
 
 public static class WinGetDriver
@@ -159,10 +171,14 @@ public static class WinGetDriver
         }
         var stdout = await stdoutTask.ConfigureAwait(false);
         var stderr = await stderrTask.ConfigureAwait(false);
+        var alreadyInstalled = p.ExitCode == WinGetExitCodes.AlreadyInstalled
+                            || p.ExitCode == WinGetExitCodes.NoApplicableUpgrade
+                            || p.ExitCode == WinGetExitCodes.UpdateNotApplicable;
         return new WinGetInstallResult
         {
-            Success = p.ExitCode == 0,
+            Success = p.ExitCode == 0 || alreadyInstalled,
             ExitCode = p.ExitCode,
+            AlreadyInstalled = alreadyInstalled,
             Output = stdout,
             Error = string.IsNullOrEmpty(stderr) ? null : stderr,
         };
