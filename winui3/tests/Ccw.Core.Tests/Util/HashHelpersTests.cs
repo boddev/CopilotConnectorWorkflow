@@ -40,8 +40,16 @@ public sealed class HashHelpersTests
     }
 
     [Fact]
-    public void ObjectHash_AppliesWhitelistRecursively()
+    public void ObjectHash_AppliesWhitelistRecursively_ObjectPathContract()
     {
+        // CAVEAT (Opus Phase-2 NB-3): the production ONLY caller is
+        // stepInputsHash(parts: unknown[]) which passes an array. For
+        // bare-object inputs, this helper's key-order semantics differ
+        // from JS replacer-array emit. This test pins the IMPLEMENTED
+        // C# behavior (insertion order + recursive whitelist), not
+        // cross-runtime byte equality. Don't add a new production caller
+        // that hashes a bare object without revisiting HashHelpers.ObjectHash.
+        //
         // Mirrors: JSON.stringify(obj, Object.keys(obj).sort())
         // The replacer-array filter applies at EVERY nesting level, not just the top.
         var obj = new JsonObject

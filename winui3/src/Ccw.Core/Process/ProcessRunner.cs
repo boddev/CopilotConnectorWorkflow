@@ -359,17 +359,108 @@ public static class ProcessRunner
 
     private static string BuildShellCommand(string cmd, IReadOnlyList<string> args)
     {
+        // Windows shell-mode quoting (GPT Phase 2 BLOCKER #5).
+        //
+        // We pass `cmd.exe /d /s /c "<cmdline>"` and rely on .NET to
+        // double-quote the whole `<cmdline>` block (because we add it
+        // via ArgumentList). Inside that block, each token needs:
+        //   1. CreateProcess-style quoting so that the child program's
+        //      own argv parser sees one argument per token (handles
+        //      spaces, backslashes, and embedded quotes).
+        //   2. Caret-escaping of cmd.exe metacharacters
+        //      (&, |, <, >, ^, %) so cmd.exe doesn't treat them as
+        //      shell syntax.
+        //
+        // The two stages compose: stage 2 is applied to the WHOLE token
+        // produced by stage 1 (after stage 1, runs of quoted material
+        // are guaranteed-balanced; cmd's metachar handling honors quotes,
+        // so escaping is only required for chars NOT inside quotes, but
+        // a defensive blanket escape outside quotes is cheap and safe).
         if (args.Count == 0)
         {
-            return cmd;
+            return CmdEscape(cmd);
         }
 
-        var sb = new StringBuilder(cmd);
-        foreach (var a in args)
+        var sb = new StringBuilder();
+        sb.Append(CmdEscape(cmd));
+        foreach (var arg in args)
         {
-            sb.Append(' ').Append(a);
+            sb.Append(' ');
+            sb.Append(CmdEscape(EscapeForCreateProcess(arg)));
         }
+        return sb.ToString();
+    }
 
+    /// <summary>Windows CreateProcess command-line quoting per the canonical
+    /// rule set (also documented as "C runtime command-line argument" rules):
+    /// quote if the arg contains whitespace, tab, or a literal quote; double
+    /// any backslashes that precede a literal quote OR the closing quote.
+    /// Internal so tests can pin behavior.</summary>
+    internal static string EscapeForCreateProcess(string arg)
+    {
+        if (arg.Length == 0) return "\"\"";
+
+        var needsQuote = false;
+        foreach (var c in arg)
+        {
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '"')
+            {
+                needsQuote = true;
+                break;
+            }
+        }
+        if (!needsQuote) return arg;
+
+        var sb = new StringBuilder(arg.Length + 2);
+        sb.Append('"');
+        for (var i = 0; i < arg.Length; i++)
+        {
+            var backslashes = 0;
+            while (i < arg.Length && arg[i] == '\\')
+            {
+                backslashes++;
+                i++;
+            }
+
+            if (i == arg.Length)
+            {
+                // Trailing backslashes — double them so they don't escape the closing quote.
+                sb.Append('\\', backslashes * 2);
+                break;
+            }
+            if (arg[i] == '"')
+            {
+                sb.Append('\\', backslashes * 2 + 1);
+                sb.Append('"');
+            }
+            else
+            {
+                sb.Append('\\', backslashes);
+                sb.Append(arg[i]);
+            }
+        }
+        sb.Append('"');
+        return sb.ToString();
+    }
+
+    /// <summary>Caret-escape cmd.exe metacharacters that appear OUTSIDE of
+    /// double-quoted runs. The simple defensive rule: walk the string,
+    /// flip an "inside-quotes" bit on each unescaped quote, and prefix
+    /// metachars outside quotes with ^.</summary>
+    internal static string CmdEscape(string s)
+    {
+        if (s.Length == 0) return s;
+        var sb = new StringBuilder(s.Length + 8);
+        var inQuote = false;
+        foreach (var c in s)
+        {
+            if (c == '"') inQuote = !inQuote;
+            if (!inQuote && (c == '&' || c == '|' || c == '<' || c == '>' || c == '^' || c == '%'))
+            {
+                sb.Append('^');
+            }
+            sb.Append(c);
+        }
         return sb.ToString();
     }
 }

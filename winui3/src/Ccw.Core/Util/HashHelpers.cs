@@ -78,10 +78,22 @@ public static class HashHelpers
         return Convert.ToHexStringLower(sha.Hash!)[..16];
     }
 
-    /// <summary>Mirrors <c>JSON.stringify(obj, Object.keys(obj).sort())</c> + sha256[:16].
+    /// <summary>Mirrors <c>JSON.stringify(obj, Object.keys(obj).sort())</c> + sha256[:16],
+    /// applied recursively (the JS replacer array filters at every nesting level —
+    /// Opus B3).
     ///
-    /// JS replacer arrays are a recursive whitelist applied at every nesting level —
-    /// not just the top. We mirror that here for parity (Opus B3).</summary>
+    /// IMPORTANT (Opus Phase-2 NB-3): in production, the ONLY caller of
+    /// <c>ObjectHash</c> is <c>stepInputsHash(parts: unknown[])</c> in
+    /// <c>orchestrator.ts</c>, which always passes an ARRAY. For arrays the
+    /// helper is fully parity-correct (key order is irrelevant, and
+    /// <c>ExtractTopLevelKeys</c> returns <c>[]</c> so nested objects pass
+    /// through structurally). For BARE OBJECT inputs whose insertion order
+    /// differs from sorted order, this C# helper emits keys in insertion
+    /// order while JS replacer-array emit forces sorted order — the hashes
+    /// will diverge. There is no production path that hits that case today;
+    /// if a future caller hashes a bare object, sort the emitted keys
+    /// before serializing (TODO marked in code) or rename the helper to
+    /// reflect the array-only contract.</summary>
     public static string ObjectHash(object? obj)
     {
         if (obj is null) return ComputeSha16("null");

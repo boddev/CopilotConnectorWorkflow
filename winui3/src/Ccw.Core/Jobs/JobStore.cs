@@ -86,7 +86,7 @@ public static class JobStore
             Workspace = dir,
             DatasetHash = datasetHash,
         };
-        SaveJob(job);
+        job = SaveJob(job);
 
         if (config.PipelineDetection is not null)
         {
@@ -159,12 +159,14 @@ public static class JobStore
         var sidecar = Path.Combine(job.Workspace, "01-evalgen", "eval.evalgen.json");
         if (!File.Exists(sidecar)) return job;
         var hash = CanonicalHash.HashEvalSetFile(sidecar).Hash;
-        var updated = job with { EvalSetHash = hash };
-        SaveJob(updated);
-        return updated;
+        return SaveJob(job with { EvalSetHash = hash });
     }
 
-    public static void SaveJob(JobRecord job)
+    /// <summary>Persist a job record, stamping UpdatedAt at write time, and
+    /// return the persisted record so the orchestrator can replace its
+    /// in-memory copy (GPT Phase 2 BLOCKER #4 — immutable records make
+    /// void-returning save a silent staleness trap).</summary>
+    public static JobRecord SaveJob(JobRecord job)
     {
         var updated = job with
         {
@@ -172,6 +174,7 @@ public static class JobStore
         };
         var file = Path.Combine(updated.Workspace, "job.json");
         File.WriteAllText(file, JsonSerializer.Serialize(updated, CcwJsonOptions.Pretty));
+        return updated;
     }
 
     public static JobRecord? LoadJob(string jobId)
