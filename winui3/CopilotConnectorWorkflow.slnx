@@ -22,4 +22,5 @@
     <Project Path="tests/Ccw.Templates.Tests/Ccw.Templates.Tests.csproj" />
     <Project Path="tests/Ccw.Parity.Tests/Ccw.Parity.Tests.csproj" />
   </Folder>
+  <Project Path="tests/Ccw.Bootstrap.Tests/Ccw.Bootstrap.Tests.csproj" />
 </Solution>

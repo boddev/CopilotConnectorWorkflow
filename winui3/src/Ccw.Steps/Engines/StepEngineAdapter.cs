@@ -73,18 +73,38 @@ public static class DefaultStepEngines
 {
     public static IReadOnlyDictionary<StepName, IStepEngineLike> Build()
     {
+        // Wire ALL six engines. Steps 1/2/4/5/6 use the NodeStepShim — they
+        // shell to a `node <bundle> step-pure <name>` entrypoint that lives
+        // outside this repo today (the Node CLI doesn't yet expose
+        // `step-pure`; that's a Phase 2 source-side change). The engines
+        // fail with a clear runtime error if the bundle is missing rather
+        // than silently no-op'ing the pipeline. Step 3 is fully in-process.
+        //
+        // The default Node executable name is "node" — relying on PATH. The
+        // default bundle path is "dist/cli.js" relative to the job's
+        // workspace; in v1, the user's checkout of the Node source is the
+        // bundle source (bootstrapper Phase 4.5 clones it). A future
+        // overload accepting nodeExe/bundlePath plumbing from the CLI's
+        // ToolResolver lands when the source-side step-pure entrypoint is
+        // available.
+        const string nodeExe = "node";
+        const string bundle = NodeStepShim.DefaultBundleRelative;
         return new Dictionary<StepName, IStepEngineLike>
         {
-            [StepName.EvalGen] = new NotYetWiredEngine(StepName.EvalGen, "Step 1 evalgen wire-up lands in slice 2.1"),
-            [StepName.Enhance] = new NotYetWiredEngine(StepName.Enhance, "Step 2 enhance wire-up lands in slice 2.2-a (Node shim)"),
+            [StepName.EvalGen] = new StepEngineAdapter(new Step1EvalGenEngine(nodeExe, bundle)),
+            [StepName.Enhance] = new StepEngineAdapter(new Step2EnhanceEngine(nodeExe, bundle)),
             [StepName.Schema] = new StepEngineAdapter(new Step3SchemaEngine()),
-            [StepName.Connector] = new NotYetWiredEngine(StepName.Connector, "Step 4 connector wire-up lands in slice 2.4"),
-            [StepName.Deploy] = new NotYetWiredEngine(StepName.Deploy, "Step 5 deploy wire-up lands in slice 2.5"),
-            [StepName.Score] = new NotYetWiredEngine(StepName.Score, "Step 6 score wire-up lands in slice 2.6"),
+            [StepName.Connector] = new StepEngineAdapter(new Step4ConnectorEngine(nodeExe, bundle)),
+            [StepName.Deploy] = new StepEngineAdapter(new Step5DeployEngine(nodeExe, bundle)),
+            [StepName.Score] = new StepEngineAdapter(new Step6ScoreEngine(nodeExe, bundle)),
         };
     }
 }
 
+// NotYetWiredEngine retained for parity tests / future seam usage —
+// callers (DefaultStepEngines) no longer instantiate it now that every
+// engine has a real implementation. Kept internal to allow tests to use
+// it as a stand-in when validating orchestrator halt semantics.
 internal sealed class NotYetWiredEngine(StepName step, string message) : IStepEngineLike
 {
     public StepName Step { get; } = step;

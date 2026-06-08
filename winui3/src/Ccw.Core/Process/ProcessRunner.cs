@@ -74,6 +74,14 @@ public sealed record RunOptions
     /// <summary>Optional sink for live log streaming. Backpressure-safe.</summary>
     public ChannelWriter<LogLine>? LogSink { get; init; }
 
+    /// <summary>If true (the historical default), <see cref="ProcessRunner.RunAsync"/>
+    /// calls <c>TryComplete()</c> on <see cref="LogSink"/> when the process exits so a
+    /// per-process consumer can drain to EOF. The orchestrator (Phase 4) shares ONE
+    /// sink across the whole pipeline; in that case the caller owns the sink lifetime
+    /// and must set this to false, otherwise the first shimmed step closes the channel
+    /// and later step logs are dropped. (GPT BLOCKER review of Phase 4.)</summary>
+    public bool CompleteLogSinkOnExit { get; init; } = true;
+
     /// <summary>Optional label prefixed onto emitted log events.</summary>
     public string? Label { get; init; }
 
@@ -266,7 +274,13 @@ public static class ProcessRunner
             // Always complete the sink so awaiting consumers wake up,
             // even on cancellation or unexpected exception
             // (GPT BLOCKER fix). TryComplete is a no-op if already done.
-            sink?.TryComplete();
+            // EXCEPTION: when the caller (e.g. the orchestrator) shares a
+            // single sink across multiple processes, leaving completion to
+            // the caller. Opt-out via CompleteLogSinkOnExit=false.
+            if (opts.CompleteLogSinkOnExit)
+            {
+                sink?.TryComplete();
+            }
         }
     }
 

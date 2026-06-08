@@ -104,6 +104,10 @@ internal static class NodeStepShim
             Env = context.Env,
             LogFile = context.LogFile,
             LogSink = context.LogSink,
+            // Orchestrator owns the shared sink lifetime across the pipeline;
+            // closing it after the first step would silently drop subsequent
+            // logs (GPT BLOCKER on Phase 4 review).
+            CompleteLogSinkOnExit = false,
             Label = $"step:{stepKey}",
         }, cancellationToken).ConfigureAwait(false);
 

@@ -13,6 +13,26 @@ internal static class RunCommand
     public static async Task<int> RunAsync(ParsedArgs args, bool resume, CancellationToken ct)
     {
         JobRecord job;
+        // Parse run-control flags up front — Opus I1/I5 + GPT I-1: invalid
+        // step names need exit code 2 (usage error) not 1 (functional fail),
+        // and should fail BEFORE any auth-preflight round-trip.
+        IReadOnlyList<StepName> forceSteps;
+        StepName? startAt;
+        StepName? stopAfter;
+        try
+        {
+            forceSteps = CollectMulti(args, "force-step")
+                .Select(ParseStepNameOrThrow)
+                .ToList();
+            startAt = args.Flag("start-at") is { } s ? ParseStepNameOrThrow(s) : null;
+            stopAfter = args.Flag("stop-after") is { } e ? ParseStepNameOrThrow(e) : null;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            return 2;
+        }
+
         if (!resume)
         {
             JobConfig cfg;
@@ -74,11 +94,7 @@ internal static class RunCommand
             }
         }, CancellationToken.None);
 
-        var forceSteps = CollectMulti(args, "force-step")
-            .Select(ParseStepNameOrThrow)
-            .ToList();
-        StepName? startAt = args.Flag("start-at") is { } s ? ParseStepNameOrThrow(s) : null;
-        StepName? stopAfter = args.Flag("stop-after") is { } e ? ParseStepNameOrThrow(e) : null;
+        var forceStepsList = forceSteps; // capture for the options closure
 
         var pipeline = await Orchestrator.RunPipelineAsync(new RunPipelineOptions
         {
@@ -86,7 +102,7 @@ internal static class RunCommand
             StepEngines = DefaultStepEngines.Build(),
             LogSink = logChannel.Writer,
             ForceAll = args.Bool("force"),
-            ForceSteps = forceSteps,
+            ForceSteps = forceStepsList,
             StartAt = startAt,
             StopAfter = stopAfter,
         }, JobStore.SaveJob, ct).ConfigureAwait(false);
@@ -235,8 +251,13 @@ internal static class RunCommand
                 CandidateAgentId = args.Flag("candidate-agent-id"),
                 SkipAgentPublish = args.Bool("skip-agent-publish") ? true : null,
                 Evaluators = args.Flag("evaluators"),
-                IndexReadyMinSeconds = args.Flag("index-ready-min-minutes") is { } mr
-                    && int.TryParse(mr, NumberStyles.Integer, CultureInfo.InvariantCulture, out var mn) ? mn * 60 : null,
+                // Node stores --index-ready-min-minutes verbatim as MINUTES into
+                // score.indexReadySettleMinutes (cli.ts:352, read at step6-score.ts:105).
+                // Both reviewers (Opus B1 / GPT I-2) flagged the prior code's
+                // *60 + wrong-field write as a silent functional bug — Step 6
+                // would have ignored the user's wait and fallen back to 60min.
+                IndexReadySettleMinutes = args.Flag("index-ready-min-minutes") is { } mr
+                    && int.TryParse(mr, NumberStyles.Integer, CultureInfo.InvariantCulture, out var mn) ? mn : null,
             };
         }
 

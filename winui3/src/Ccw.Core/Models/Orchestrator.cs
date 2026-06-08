@@ -193,11 +193,17 @@ public static class Orchestrator
             }
         }
 
-        // Mark whole job done if all executed steps succeeded (or are still pending because skipped via start/stop).
+        // Mirror Node orchestrator.ts:85-89: requiredDone checks the FULL
+        // 6-step sequence, not just the executed subrange. A run with
+        // --stop-after deploy leaves `score` pending → final status is
+        // failed. This is observable through the `=== Pipeline <status> ===`
+        // framing line which IS in the step-log stream parity contract
+        // (plan §4 Opus I7). Both reviewers (Opus I2, GPT B2) flagged the
+        // earlier subrange-only check as a parity drift.
         var requiredDone = true;
-        for (var i = startIdx; i <= stopIdx; i++)
+        foreach (var sn in steps)
         {
-            var st = job.Steps[steps[i]].Status;
+            var st = job.Steps[sn].Status;
             if (st != StepStatus.Done && st != StepStatus.Skipped) { requiredDone = false; break; }
         }
         job = saveJob(job with { Status = requiredDone ? JobStatus.Done : JobStatus.Failed });

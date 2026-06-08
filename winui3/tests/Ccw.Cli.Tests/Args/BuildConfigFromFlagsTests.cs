@@ -98,14 +98,18 @@ public sealed class BuildConfigFromFlagsTests
     }
 
     [Fact]
-    public void Build_IndexReadyMinMinutes_StoredAsSeconds()
+    public void Build_IndexReadyMinMinutes_StoredAsMinutes_VerbatimFromFlag()
     {
-        // Node stores as seconds; flag is in minutes. Conversion x60.
+        // Node stores --index-ready-min-minutes raw, as MINUTES, into
+        // score.indexReadySettleMinutes (cli.ts:352). The earlier port
+        // mistakenly wrote *60 into IndexReadyMinSeconds — both reviewers
+        // caught this as a BLOCKER. Pinning the corrected behavior here.
         var args = Parse("run",
             "--dataset", "x", "--description", "d", "--connector-id", "c", "--connector-name", "n",
             "--index-ready-min-minutes", "5");
         var cfg = RunCommand.BuildConfigFromFlags(args);
         Assert.NotNull(cfg.Score);
-        Assert.Equal(300, cfg.Score!.IndexReadyMinSeconds);
+        Assert.Equal(5, cfg.Score!.IndexReadySettleMinutes);
+        Assert.Null(cfg.Score.IndexReadyMinSeconds);
     }
 }

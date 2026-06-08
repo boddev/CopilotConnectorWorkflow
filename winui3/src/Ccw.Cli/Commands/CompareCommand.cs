@@ -1,5 +1,6 @@
 using System.Globalization;
 using Ccw.Core.Compare;
+using Ccw.Core.Jobs;
 
 namespace Ccw.Cli.Commands;
 
@@ -16,9 +17,17 @@ internal static class CompareCommand
         var outputDir = args.Flag("output");
         if (string.IsNullOrEmpty(outputDir))
         {
+            // Default to %LOCALAPPDATA%\CopilotConnectorWorkflow\workspace\
+            // compare-reports — consistent with the workspace-root divergence
+            // documented in plan §10. Earlier code resolved CWD-relative
+            // ("workspace/compare-reports") which would scatter reports
+            // around the filesystem and fail when ccw was invoked from
+            // C:\Windows\System32 (Opus I3 review).
+            var workspaceParent = Path.GetDirectoryName(JobStore.WorkspaceRoot())
+                                  ?? Directory.GetCurrentDirectory();
             var stamp = DateTime.UtcNow.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture);
-            outputDir = Path.GetFullPath(Path.Combine("workspace", "compare-reports",
-                $"{stamp}-{jobIds[0]}-vs-{jobIds[1]}"));
+            outputDir = Path.Combine(workspaceParent, "compare-reports",
+                $"{stamp}-{jobIds[0]}-vs-{jobIds[1]}");
         }
         else
         {
