@@ -166,29 +166,41 @@ internal static class NodeStepShim
 
         var status = envelope.Status switch
         {
-            "done" when containmentErrors.Count == 0 && envelope.Error is null => StepStatus.Done,
+            // GPT Phase-2 closure BLOCKER #2: require the process to have
+            // exited cleanly too. A shim that writes "done" then crashes
+            // with exit 1 was previously falsely succeeding. Mark Failed
+            // whenever processResult is supplied and !Ok.
+            "done" when containmentErrors.Count == 0
+                     && envelope.Error is null
+                     && (processResult is null || processResult.Ok) => StepStatus.Done,
             _ => StepStatus.Failed,
         };
 
         IReadOnlyList<string>? diagnostics = null;
-        if ((envelope.Diagnostics is { Count: > 0 }) || containmentErrors.Count > 0)
+        var procDiagnostics = (processResult is { Ok: false } && envelope.Status == "done")
+            ? new[] { $"shim exited {processResult.ExitCode} despite reporting 'done'" }
+            : Array.Empty<string>();
+        if ((envelope.Diagnostics is { Count: > 0 }) || containmentErrors.Count > 0 || procDiagnostics.Length > 0)
         {
             var combined = new List<string>();
             if (envelope.Diagnostics is not null) combined.AddRange(envelope.Diagnostics);
             combined.AddRange(containmentErrors);
+            combined.AddRange(procDiagnostics);
             diagnostics = combined;
         }
 
         return new StepRunResult
         {
             Status = status,
-            ExitCode = envelope.ExitCode,
+            ExitCode = (processResult is { Ok: false }) ? processResult.ExitCode : envelope.ExitCode,
             StartedAt = startedAt,
             EndedAt = endedAt,
             Artifacts = artifacts,
             Diagnostics = diagnostics,
             ErrorMessage = status == StepStatus.Failed
-                ? envelope.Error ?? (containmentErrors.Count > 0 ? string.Join("; ", containmentErrors) : null)
+                ? envelope.Error
+                    ?? (containmentErrors.Count > 0 ? string.Join("; ", containmentErrors)
+                    : (processResult is { Ok: false } ? $"shim exited {processResult.ExitCode}" : null))
                 : null,
         };
     }
@@ -212,7 +224,17 @@ internal static class NodeStepShim
 
     /// <summary>Resolve <paramref name="relPath"/> against
     /// <paramref name="workspaceRoot"/>, returning false if the result
-    /// would escape the workspace (GPT BLOCKER #7).</summary>
+    /// would escape the workspace (GPT BLOCKER #7).
+    ///
+    /// <para>Hardened per Opus Phase-2 closure I-4 + NIT (symlinks/junctions
+    /// + 8.3/`\\?\` form mismatches): we walk reparse points before the
+    /// prefix check so a junction or symlink INSIDE the workspace that
+    /// targets a path outside is rejected, and we canonicalize both sides
+    /// via <see cref="Path.GetFullPath(string)"/> to normalize directory
+    /// separators and casing. We do NOT touch 8.3 short names — those
+    /// require a Win32 round-trip that's overkill for our trust model
+    /// (the shim is first-party). If a future caller needs 8.3 robustness,
+    /// resolve via <c>GetLongPathName</c> before this method.</para></summary>
     internal static bool TryResolveContained(string workspaceRoot, string relPath, out string resolved)
     {
         var rootFull = Path.GetFullPath(workspaceRoot);
@@ -221,22 +243,68 @@ internal static class NodeStepShim
             : Path.Combine(rootFull, relPath);
         var fullCandidate = Path.GetFullPath(combined);
 
-        // Use ordinal case-insensitive comparison on Windows; ordinal on
-        // POSIX. PathSeparator/DirectorySeparator hygiene: rootFull has
-        // no trailing separator after GetFullPath, so append one for the
-        // prefix check to avoid /workspace2 matching /workspace.
-        var rootWithSep = rootFull.TrimEnd(Path.DirectorySeparatorChar)
+        // Resolve reparse points (junctions, symlinks) on both sides so a
+        // junction inside the workspace pointing outside is caught.
+        var resolvedCandidate = ResolveReparsePoints(fullCandidate);
+        var resolvedRoot = ResolveReparsePoints(rootFull);
+
+        var rootWithSep = resolvedRoot.TrimEnd(Path.DirectorySeparatorChar)
             + Path.DirectorySeparatorChar;
         var comp = OperatingSystem.IsWindows()
             ? StringComparison.OrdinalIgnoreCase
             : StringComparison.Ordinal;
-        if (!fullCandidate.StartsWith(rootWithSep, comp) && !string.Equals(fullCandidate, rootFull, comp))
+        if (!resolvedCandidate.StartsWith(rootWithSep, comp)
+            && !string.Equals(resolvedCandidate, resolvedRoot, comp))
         {
             resolved = string.Empty;
             return false;
         }
+        // Return the un-resolved candidate so artifact paths stay stable
+        // for callers that compute file hashes — the existence + containment
+        // check is what matters, not which physical path is hashed.
         resolved = fullCandidate;
         return true;
+    }
+
+    /// <summary>Walk a path's last segment as far as the OS will reveal,
+    /// resolving any reparse-point hops. If a segment doesn't exist, returns
+    /// the path as-is (which is fine for the containment check — the
+    /// non-existent leaf can't escape).</summary>
+    private static string ResolveReparsePoints(string path)
+    {
+        try
+        {
+            // FileInfo.LinkTarget / DirectoryInfo.LinkTarget were added in .NET 6.
+            // If the leaf exists and is a reparse point, follow the chain (one hop
+            // is enough — the OS resolves chains transparently on most filesystems,
+            // but we loop defensively to catch the rare double-hop).
+            var current = path;
+            for (var hop = 0; hop < 8; hop++)
+            {
+                FileSystemInfo? info = File.Exists(current)
+                    ? new FileInfo(current)
+                    : Directory.Exists(current)
+                        ? new DirectoryInfo(current)
+                        : null;
+                if (info is null) return Path.GetFullPath(current);
+                var target = info.LinkTarget;
+                if (target is null) return Path.GetFullPath(current);
+                // Resolve relative link targets against the link's parent.
+                var parent = Path.GetDirectoryName(current) ?? string.Empty;
+                current = Path.IsPathRooted(target)
+                    ? target
+                    : Path.GetFullPath(Path.Combine(parent, target));
+            }
+            return Path.GetFullPath(current);
+        }
+        catch (IOException)
+        {
+            return Path.GetFullPath(path);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return Path.GetFullPath(path);
+        }
     }
 
     internal static string NormalizeRelative(string path)

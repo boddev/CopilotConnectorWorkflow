@@ -359,30 +359,34 @@ public static class ProcessRunner
 
     private static string BuildShellCommand(string cmd, IReadOnlyList<string> args)
     {
-        // Windows shell-mode quoting (GPT Phase 2 BLOCKER #5).
+        // Windows shell-mode quoting (GPT Phase 2 BLOCKER #5, plus Phase-2
+        // closure follow-up BLOCKER #1 — cmd itself must go through
+        // CRT/CreateProcess quoting too, otherwise a path like
+        // "C:\Program Files\node\npm.cmd" splits on the space inside the
+        // shell-composed command line).
+        //
+        // KNOWN GOTCHA (Opus Phase-2 closure I-3): `^%` does NOT suppress
+        // %VAR% expansion under `cmd /c`. Caret can't escape percent, and
+        // `%%` only works inside batch files. If a caller passes an argument
+        // containing a defined env-var token (e.g. a path with `%TEMP%`), it
+        // will silently expand. The mitigation in Phase 4+ is to call node
+        // directly (not via the cmd shim path) whenever possible, and to
+        // document this for any path that DOES go through here.
         //
         // We pass `cmd.exe /d /s /c "<cmdline>"` and rely on .NET to
         // double-quote the whole `<cmdline>` block (because we add it
         // via ArgumentList). Inside that block, each token needs:
-        //   1. CreateProcess-style quoting so that the child program's
-        //      own argv parser sees one argument per token (handles
-        //      spaces, backslashes, and embedded quotes).
+        //   1. CreateProcess-style quoting so the child program's
+        //      own argv parser sees one argument per token.
         //   2. Caret-escaping of cmd.exe metacharacters
-        //      (&, |, <, >, ^, %) so cmd.exe doesn't treat them as
-        //      shell syntax.
-        //
-        // The two stages compose: stage 2 is applied to the WHOLE token
-        // produced by stage 1 (after stage 1, runs of quoted material
-        // are guaranteed-balanced; cmd's metachar handling honors quotes,
-        // so escaping is only required for chars NOT inside quotes, but
-        // a defensive blanket escape outside quotes is cheap and safe).
+        //      (&, |, <, >, ^, %) outside the quoted runs.
         if (args.Count == 0)
         {
-            return CmdEscape(cmd);
+            return CmdEscape(EscapeForCreateProcess(cmd));
         }
 
         var sb = new StringBuilder();
-        sb.Append(CmdEscape(cmd));
+        sb.Append(CmdEscape(EscapeForCreateProcess(cmd)));
         foreach (var arg in args)
         {
             sb.Append(' ');
@@ -390,6 +394,12 @@ public static class ProcessRunner
         }
         return sb.ToString();
     }
+
+    /// <summary>Builds a Windows shell command line. Public for tests so
+    /// they can pin the full composed command, not just the individual
+    /// helpers (GPT Phase-2 closure follow-up).</summary>
+    internal static string BuildShellCommandForTests(string cmd, IReadOnlyList<string> args)
+        => BuildShellCommand(cmd, args);
 
     /// <summary>Windows CreateProcess command-line quoting per the canonical
     /// rule set (also documented as "C runtime command-line argument" rules):

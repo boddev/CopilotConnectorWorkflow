@@ -49,6 +49,19 @@ public sealed class Step3SchemaEngine : IStepEngine
         ArgumentNullException.ThrowIfNull(context);
         Directory.CreateDirectory(context.StepOutDir);
 
+        // GPT Phase-2 closure BLOCKER #3: pre-clean stale outputs so a
+        // re-run after a previous (possibly Node) run doesn't leave Step 4
+        // consuming a schema.ts file that's out-of-sync with the new
+        // connector-schema.json this engine is about to write.
+        foreach (var stale in new[] { "connector-schema.json", "schema-validation.json", "schema.ts" })
+        {
+            var p = Path.Combine(context.StepOutDir, stale);
+            if (File.Exists(p))
+            {
+                try { File.Delete(p); } catch (IOException) { /* best effort */ }
+            }
+        }
+
         var startedAt = DateTimeOffset.UtcNow.ToString("o", CultureInfo.InvariantCulture);
 
         var enhanceDir = Path.Combine(context.Job.Workspace, "02-enhance");
