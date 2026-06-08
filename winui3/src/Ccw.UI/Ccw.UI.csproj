@@ -65,6 +65,7 @@
     <AppxManifest Include="Package.appxmanifest">
       <SubType>Designer</SubType>
     </AppxManifest>
+    <Content Include="Assets\Packaging\**\*.png" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <PropertyGroup Condition="'$(WindowsPackageType)'=='MSIX'">

@@ -34,7 +34,9 @@ internal static class Program
 
             Application.Start(static initArgs =>
             {
-                var ctx = new DispatcherQueueSynchronizationContext(DispatcherQueue.GetForCurrentThread());
+                var dispatcher = DispatcherQueue.GetForCurrentThread();
+                App.UiDispatcher = dispatcher;
+                var ctx = new DispatcherQueueSynchronizationContext(dispatcher);
                 System.Threading.SynchronizationContext.SetSynchronizationContext(ctx);
                 _ = new App();
             });
