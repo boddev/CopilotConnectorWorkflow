@@ -7,6 +7,8 @@ namespace Ccw.UI.Views;
 
 public sealed partial class MainShell : Page
 {
+    private bool _depsBannerDismissed;
+
     public MainShell()
     {
         InitializeComponent();
@@ -14,6 +16,7 @@ public sealed partial class MainShell : Page
         nav.RegisterFrame(ContentFrame);
         ContentFrame.Navigate(typeof(JobsListPage));
         Nav.SelectedItem = Nav.MenuItems[0];
+        DepsBanner.CloseButtonClick += (_, __) => _depsBannerDismissed = true;
         _ = CheckDependenciesAsync();
     }
 
@@ -32,14 +35,20 @@ public sealed partial class MainShell : Page
     }
 
     /// <summary>Phase 6: on every launch, probe deps in the background and
-    /// surface the banner if anything is missing. Non-blocking by design;
-    /// the user can dismiss and the banner just won't re-show this session.</summary>
+    /// surface the banner if anything is missing. Non-blocking by design.
+    /// Phase 6 reviewer fold-ins (Opus I3 + GPT I3):
+    ///   - GetOrProbeAsync reuses the wizard's snapshot when the wizard
+    ///     already ran a probe, avoiding 16 child processes spawning in
+    ///     parallel.
+    ///   - If the user dismisses the banner before the probe completes,
+    ///     `_depsBannerDismissed` blocks the late open.</summary>
     private async System.Threading.Tasks.Task CheckDependenciesAsync()
     {
         try
         {
             var bootstrap = App.GetService<BootstrapOrchestrator>();
-            var probes = await bootstrap.ProbeAllAsync().ConfigureAwait(true);
+            var probes = await bootstrap.GetOrProbeAsync().ConfigureAwait(true);
+            if (_depsBannerDismissed) return;
             if (!BootstrapOrchestrator.AllSatisfied(probes))
             {
                 DepsBanner.IsOpen = true;
@@ -60,6 +69,7 @@ public sealed partial class MainShell : Page
                 Nav.SelectedItem = nvi;
                 ContentFrame.Navigate(typeof(WizardPage));
                 DepsBanner.IsOpen = false;
+                _depsBannerDismissed = true;
                 return;
             }
         }

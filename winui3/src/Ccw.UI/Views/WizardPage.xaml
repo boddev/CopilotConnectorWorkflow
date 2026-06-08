@@ -22,7 +22,8 @@
 
         <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="12">
             <Button Content="Refresh" Command="{x:Bind ViewModel.RefreshCommand}" IsEnabled="{x:Bind ViewModel.IsBusy, Mode=OneWay, Converter={StaticResource NegateBool}, FallbackValue=True}"/>
-            <Button Content="Install missing (winget)" Command="{x:Bind ViewModel.InstallMissingCommand}" IsEnabled="{x:Bind ViewModel.IsBusy, Mode=OneWay, Converter={StaticResource NegateBool}, FallbackValue=True}"/>
+            <Button Content="Install missing (winget)" Command="{x:Bind ViewModel.InstallMissingCommand}" IsEnabled="{x:Bind ViewModel.CanInstall, Mode=OneWay, FallbackValue=False}"/>
+            <Button Content="Cancel" Command="{x:Bind ViewModel.CancelCommand}" IsEnabled="{x:Bind ViewModel.CanCancel, Mode=OneWay, FallbackValue=False}"/>
         </StackPanel>
 
         <ListView Grid.Row="2" ItemsSource="{x:Bind ViewModel.Rows}" SelectionMode="None">
@@ -43,7 +44,7 @@
                         <HyperlinkButton Grid.Column="2"
                                          NavigateUri="{x:Bind ManualLink, Mode=OneTime, FallbackValue=''}"
                                          Content="Docs"
-                                         Visibility="Visible"/>
+                                         Visibility="{x:Bind HasManualLink, Mode=OneTime}"/>
                     </Grid>
                 </DataTemplate>
             </ListView.ItemTemplate>
@@ -52,7 +53,7 @@
         <StackPanel Grid.Row="3" Orientation="Horizontal" Spacing="12">
             <CheckBox Content="Clone sibling repos" IsChecked="{x:Bind ViewModel.CloneSiblings, Mode=TwoWay}"/>
             <TextBox PlaceholderText="src root" Text="{x:Bind ViewModel.SrcRoot, Mode=TwoWay}" Width="420"/>
-            <Button Content="Clone &amp; build" Command="{x:Bind ViewModel.CloneSiblingsCommand}" IsEnabled="{x:Bind ViewModel.IsBusy, Mode=OneWay, Converter={StaticResource NegateBool}, FallbackValue=True}"/>
+            <Button Content="Clone &amp; build" Command="{x:Bind ViewModel.CloneSiblingsCommand}" IsEnabled="{x:Bind ViewModel.CanClone, Mode=OneWay, FallbackValue=False}"/>
         </StackPanel>
 
         <TextBlock Grid.Row="4" Text="{x:Bind ViewModel.ProgressText, Mode=OneWay}" Opacity="0.7" TextWrapping="Wrap"/>
