@@ -1,0 +1,26 @@
+{
+  "items": [
+    {
+      "id": "zoo-1",
+      "prompt": "  What is the capital of France?  ",
+      "expected_answer": "Paris",
+      "assertions": [
+        {"value": "Paris", "wholeWord": true},
+        {"value": "France"}
+      ],
+      "supporting_facts": ["Paris is the capital", " trimme me "],
+      "category": "geography",
+      "difficulty": "easy"
+    },
+    {
+      "prompt": "Largest planet?",
+      "expected_answer": "Jupiter",
+      "assertions": [{"value": "Jupiter"}]
+    },
+    {
+      "id": "abc",
+      "prompt": "  ",
+      "expected_answer": "skip"
+    }
+  ]
+}

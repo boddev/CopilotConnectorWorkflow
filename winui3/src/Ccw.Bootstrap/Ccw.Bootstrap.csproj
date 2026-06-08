@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Ccw.Bootstrap</RootNamespace>
+    <AssemblyName>Ccw.Bootstrap</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Ccw.Core\Ccw.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Ccw.Cli" />
+    <InternalsVisibleTo Include="Ccw.Parity.Tests" />
+  </ItemGroup>
+
+</Project>

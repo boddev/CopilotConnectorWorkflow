@@ -1,0 +1,48 @@
+<Project>
+  <!--
+    Central Package Management (CPM) for CopilotConnectorWorkflow's WinUI 3
+    surface. Mirrors the eval-ui-winui3 convention so the two repos pull
+    consistent versions of MSAL, Polly, System.Text.Json, etc., when both
+    are consumed in the same dev box.
+
+    Phase 0 keeps this file lean: only the packages needed to scaffold and
+    smoke-test the solution. Engine + UI packages get added in their own
+    PRs (the slice that introduces them adds the matching
+    `<PackageVersion />` here in the same change as the `<PackageReference />`
+    in its csproj).
+  -->
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Test harness — same versions as eval-ui-winui3 to avoid drift. -->
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageVersion Include="xunit" Version="2.9.3" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <PackageVersion Include="coverlet.collector" Version="6.0.4" />
+
+    <!--
+      Phase 4 (CLI) will add:
+        - System.CommandLine
+
+      Phase 1 (Ccw.Core) will add (as each slice lands):
+        - System.IO.Hashing            (xxhash for stable IDs)
+        - Polly                        v8 retry pipelines
+        - Microsoft.Identity.Client    MSAL core (Phase 3)
+        - Microsoft.Identity.Client.Extensions.Msal  DPAPI-protected cache (Phase 3)
+
+      Phase 5 (Ccw.UI) will add:
+        - Microsoft.WindowsAppSDK
+        - Microsoft.Windows.SDK.BuildTools
+        - CommunityToolkit.Mvvm
+        - Microsoft.Identity.Client.Broker   WAM (Opus I3)
+        - Markdig                              markdown -> XAML (Opus I4 — NO WebView2)
+        - System.Security.Permissions          MSIX validate task host workaround
+
+      Phase 4.5 (Ccw.Bootstrap) does NOT need any new packages — winget
+      is invoked as a subprocess via `Ccw.Core.ProcessRunner`.
+    -->
+  </ItemGroup>
+</Project>

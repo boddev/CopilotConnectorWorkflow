@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Ccw.Parity.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="coverlet.collector" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Cross-runtime parity harness - shells out to the Node `ccw run`
+      (build mode) against the same dataset and diffs rendered artifacts,
+      schema, hashes, scored-report JSON, comparator output. Layered diff
+      strategy per plan Phase 8 (byte-exact for templates; canonical JSON
+      for semantic artifacts; allowlist for timestamps/paths/IDs; skip
+      node_modules + package-lock.json).
+    -->
+    <ProjectReference Include="..\..\src\Ccw.Core\Ccw.Core.csproj" />
+    <ProjectReference Include="..\..\src\Ccw.Steps\Ccw.Steps.csproj" />
+    <ProjectReference Include="..\..\src\Ccw.Templates\Ccw.Templates.csproj" />
+    <ProjectReference Include="..\..\src\Ccw.Bootstrap\Ccw.Bootstrap.csproj" />
+  </ItemGroup>
+
+</Project>

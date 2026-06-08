@@ -1,0 +1,8 @@
+{
+  "//": "Pins the .NET SDK feature band used by CopilotConnectorWorkflow's WinUI 3 surface. Matches the eval-ui-winui3 sibling repo (10.0.300, latestPatch, allowPrerelease=false). rollForward=latestPatch keeps us on patch-level updates only so a feature-band bump can't silently ship a new analyzer wave that breaks TreatWarningsAsErrors.",
+  "sdk": {
+    "version": "10.0.300",
+    "rollForward": "latestPatch",
+    "allowPrerelease": false
+  }
+}
