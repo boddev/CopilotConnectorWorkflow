@@ -1,0 +1,38 @@
+# Build output
+bin/
+obj/
+out/
+*.user
+
+# Visual Studio / Rider
+.vs/
+.idea/
+*.suo
+*.cache
+
+# Test output
+TestResults/
+*.coverage
+*.coveragexml
+coverage.cobertura.xml
+
+# MSIX / packaging artifacts
+*.msix
+*.msixbundle
+*.appx
+*.appxbundle
+*.appxsym
+*.appxupload
+*.cer
+*.pfx
+AppPackages/
+BundleArtifacts/
+packaging/portable/dist/
+
+# Generated NuGet
+*.nupkg
+*.snupkg
+*.lock.json
+
+# Logs
+*.log

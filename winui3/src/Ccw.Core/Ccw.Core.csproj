@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Ccw.Core</RootNamespace>
+    <AssemblyName>Ccw.Core</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Ccw.Core.Tests" />
+    <InternalsVisibleTo Include="Ccw.Steps" />
+    <InternalsVisibleTo Include="Ccw.Steps.Tests" />
+    <InternalsVisibleTo Include="Ccw.Templates" />
+    <InternalsVisibleTo Include="Ccw.Templates.Tests" />
+    <InternalsVisibleTo Include="Ccw.Bootstrap" />
+    <InternalsVisibleTo Include="Ccw.Cli" />
+    <InternalsVisibleTo Include="Ccw.Cli.Tests" />
+    <InternalsVisibleTo Include="Ccw.Parity.Tests" />
+  </ItemGroup>
+
+</Project>

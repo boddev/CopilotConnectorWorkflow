@@ -1,0 +1,68 @@
+<Project>
+
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <!--
+      AnalysisLevel pinned to 10.0 (not 'latest') so a TreatWarningsAsErrors
+      build never silently breaks when the toolchain ships a new analyzer
+      wave. Matches the eval-ui-winui3 convention; bump deliberately when
+      we want new rules.
+    -->
+    <AnalysisLevel>10.0</AnalysisLevel>
+    <AnalysisMode>Recommended</AnalysisMode>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <NeutralLanguage>en-US</NeutralLanguage>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition=" '$(GITHUB_ACTIONS)' == 'true' ">true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
+  <!--
+    CopilotConnectorWorkflow WinUI 3 surface targets .NET 10 LTS + Windows
+    App SDK 2.1.x. Mirrors the eval-ui-winui3 stack so the C# engine
+    ProjectReferences across the two repos line up.
+
+    The WinUI 3 head (`Ccw.UI`) — added in Phase 5 — adds a Windows-specific
+    TFM (`net10.0-windows10.0.19041.0`) only on that one project; every
+    other project here is plain `net10.0`.
+  -->
+
+  <!--
+    EvalToolkit (eval-ui-winui3 sibling repo) consumption.
+
+    Plan §3 / GPT-5.5 review B1: the path from
+    `CopilotConnectorWorkflow/winui3/<project>/` up to
+    `copilot-eval-utils\eval-ui-winui3` is **four** `..` segments. Probe a
+    list of candidate roots (sibling checkout, user-home default,
+    `EvalToolkitRoot` env override) and fall back to NuGet if none match.
+
+    Release builds pin the EvalToolkit version via `<EvalToolkitVersion>`
+    and use the NuGet path; the local `ProjectReference` is a dev
+    convenience for hot-edit cross-repo debugging. CI fails the build if
+    the locally referenced commit doesn't match `<EvalToolkitVersion>`
+    (GPT-5.5 IMPORTANT) so release MSIX is bit-for-bit reproducible.
+  -->
+  <PropertyGroup>
+    <_CcwEvalToolkitCandidates Condition=" '$(EVALTOOLKIT_ROOT)' != '' ">$(EVALTOOLKIT_ROOT)</_CcwEvalToolkitCandidates>
+    <_CcwEvalToolkitDefaultSiblingPath>$(MSBuildThisFileDirectory)..\..\..\copilot-eval-utils\eval-ui-winui3</_CcwEvalToolkitDefaultSiblingPath>
+    <_CcwEvalToolkitDefaultUserPath>$(USERPROFILE)\src\copilot-eval-utils\eval-ui-winui3</_CcwEvalToolkitDefaultUserPath>
+
+    <EvalToolkitRoot Condition=" '$(EvalToolkitRoot)' == '' And '$(_CcwEvalToolkitCandidates)' != '' And Exists('$(_CcwEvalToolkitCandidates)\EvalToolkit.slnx') ">$(_CcwEvalToolkitCandidates)</EvalToolkitRoot>
+    <EvalToolkitRoot Condition=" '$(EvalToolkitRoot)' == '' And Exists('$(_CcwEvalToolkitDefaultSiblingPath)\EvalToolkit.slnx') ">$(_CcwEvalToolkitDefaultSiblingPath)</EvalToolkitRoot>
+    <EvalToolkitRoot Condition=" '$(EvalToolkitRoot)' == '' And Exists('$(_CcwEvalToolkitDefaultUserPath)\EvalToolkit.slnx') ">$(_CcwEvalToolkitDefaultUserPath)</EvalToolkitRoot>
+
+    <UseEvalToolkitNuGet Condition=" '$(EvalToolkitRoot)' == '' ">true</UseEvalToolkitNuGet>
+
+    <!--
+      EvalToolkit version pin for release / NuGet-fallback builds. Until
+      eval-ui-winui3 CI publishes packages this version is informational
+      only; once it does, CI fails if the local `EvalToolkitRoot`'s
+      commit doesn't match this pin.
+    -->
+    <EvalToolkitVersion>0.1.0-preview.0</EvalToolkitVersion>
+  </PropertyGroup>
+
+</Project>

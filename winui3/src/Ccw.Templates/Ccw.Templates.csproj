@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Ccw.Templates</RootNamespace>
+    <AssemblyName>Ccw.Templates</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Ccw.Templates.Tests" />
+    <InternalsVisibleTo Include="Ccw.Steps" />
+    <InternalsVisibleTo Include="Ccw.Parity.Tests" />
+  </ItemGroup>
+
+  <!--
+    Phase 7 (MSIX packaging) wires up the EmbeddedResource glob below.
+    Opus I5 requires `templates/` to ship as RAW BYTES so CRLF/LF drift
+    can't break snapshot parity against the Node renderer. The
+    `.gitattributes` at the repo root pins EOLs under `templates/` so any
+    conversion is caught at commit time.
+
+    Kept commented out at Phase 0 so the empty project builds cleanly
+    until the Phase 1g `Ccw.Core.Templating` consumer exists to bind to.
+  -->
+  <!--
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\..\templates\**\*">
+      <LogicalName>Ccw.Templates.%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+  -->
+
+</Project>
