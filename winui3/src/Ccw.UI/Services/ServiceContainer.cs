@@ -19,6 +19,7 @@ internal static class ServiceContainer
         var diagnostics = new DiagnosticsService();
         var markdown = new MarkdownReportRenderer();
         var fileRouter = new FileActivationRouter(nav, jobs);
+        var bootstrap = new BootstrapOrchestrator(diagnostics);
 
         return new Dictionary<Type, object>
         {
@@ -28,6 +29,7 @@ internal static class ServiceContainer
             [typeof(DiagnosticsService)] = diagnostics,
             [typeof(MarkdownReportRenderer)] = markdown,
             [typeof(FileActivationRouter)] = fileRouter,
+            [typeof(BootstrapOrchestrator)] = bootstrap,
         };
     }
 }
