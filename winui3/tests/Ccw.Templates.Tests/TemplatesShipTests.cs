@@ -20,11 +20,19 @@
 using System.IO;
 using System.Security.Cryptography;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace Ccw.Templates.Tests;
 
 public class TemplatesShipTests
 {
+    private readonly ITestOutputHelper _output;
+
+    public TemplatesShipTests(ITestOutputHelper output)
+    {
+        _output = output;
+    }
+
     [Fact]
     public void TemplatesRoot_ExistsNextToTestAssembly()
     {
@@ -101,11 +109,32 @@ public class TemplatesShipTests
         if (sourceRoot is null)
         {
             // Running from an out-of-tree publish (e.g. inside the portable
-            // ZIP / inside MSIX) — there is no source tree to compare. The
-            // other tests still verify the runtime templates exist; skip
-            // this one rather than fail.
+            // ZIP / inside MSIX) — there is no source tree to compare. Log
+            // visibly so a silent-pass regression on the locator heuristic
+            // doesn't disable the strongest template-drift guarantee
+            // (Opus Phase 8 NIT 2 + GPT Phase 8 IMPORTANT 6).
+            //
+            // On GitHub-hosted runners we fail closed: CI MUST have the
+            // source tree (it's a `actions/checkout@v4` job), so a missing
+            // tree there is a CI configuration regression, not an
+            // out-of-tree publish.
+            var ci = Environment.GetEnvironmentVariable("CI") ?? Environment.GetEnvironmentVariable("GITHUB_ACTIONS");
+            if (!string.IsNullOrEmpty(ci))
+            {
+                throw new Xunit.Sdk.XunitException(
+                    "LocateSourceTreeTemplates() returned null under CI. The 12-deep walk-up failed to " +
+                    "find a source-tree templates/ directory. Either the test working directory is no longer " +
+                    "under the repo root, or the heuristic needs widening. Refusing to silently skip the " +
+                    "byte-for-byte snapshot check in CI.");
+            }
+            _output.WriteLine(
+                "EveryTemplateFile_MatchesSourceTree_ByteForByte: source-tree templates/ NOT located " +
+                "(out-of-tree publish — e.g. running from portable ZIP or installed MSIX). The byte-exact " +
+                "source-vs-runtime check is intentionally skipped in this configuration. The other tests " +
+                "still verify the runtime templates exist + contain the expected subtrees.");
             return;
         }
+        _output.WriteLine($"Source-tree templates located at: {sourceRoot}");
 
         var runtimeRoot = TemplatesInfo.TemplatesRoot;
 

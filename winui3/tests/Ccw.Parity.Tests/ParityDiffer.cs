@@ -26,7 +26,7 @@ using System.Text.RegularExpressions;
 
 namespace Ccw.Parity.Tests;
 
-internal enum ParityDiffMode
+public enum ParityDiffMode
 {
     /// <summary>Compare raw bytes.</summary>
     ByteExact,
@@ -37,23 +37,31 @@ internal enum ParityDiffMode
     Skip,
 }
 
-internal sealed record ParityDiffResult(string RelativePath, bool Equal, string? Detail);
+public sealed record ParityDiffResult(string RelativePath, bool Equal, string? Detail);
 
 /// <summary>Diff utility implementing the layered strategy. Stateless:
 /// callers feed a (file, mode) classifier in.</summary>
-internal static class ParityDiffer
+public static class ParityDiffer
 {
     /// <summary>Allowlist patterns applied before diffing JSON / text. Matches
     /// are replaced with a placeholder so diff doesn't trip on values that
     /// vary per run.</summary>
+    /// <remarks>
+    /// Order matters — patterns run in list order against the same buffer,
+    /// so any later pattern only sees what the earlier pattern left behind.
+    /// GUID is listed BEFORE HEX_ID (Opus Phase 8 BLOCKER 1) because the
+    /// HEX_ID regex's <c>\b</c> boundaries break GUIDs at every <c>-</c>
+    /// and would silently chimera-mask GUIDs as `&lt;HEX_ID&gt;-..-..-..-&lt;HEX_ID&gt;`.
+    /// </remarks>
     public static readonly IReadOnlyList<(Regex Pattern, string Placeholder)> DefaultAllowlist =
     [
         // ISO-8601 timestamps (matches what JSON Date.toISOString() emits).
         (new Regex(@"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z", RegexOptions.Compiled), "<TIMESTAMP>"),
-        // Unix epoch numbers > 1e12 (ms-precision; covers the Node Date.now()
-        // and most C# DateTimeOffset.ToUnixTimeMilliseconds outputs without
-        // false-matching small ordinals).
-        (new Regex(@"\b1[6-9]\d{11}\b", RegexOptions.Compiled), "<EPOCHMS>"),
+        // Unix epoch numbers in milliseconds. Loosened from the original
+        // 1[6-9]\d{11} (which expires Sept 2033) to [12]\d{12} so the
+        // pattern keeps working through year 5138 without quiet rot
+        // (Opus Phase 8 NIT 1).
+        (new Regex(@"\b[12]\d{12}\b", RegexOptions.Compiled), "<EPOCHMS>"),
         // Absolute Windows paths under workspace or LOCALAPPDATA. Any
         // multi-segment path containing 'workspace' or 'CopilotConnectorWorkflow'.
         // Backslash separators may be raw (`C:\Users\...`) or JSON-encoded
@@ -63,10 +71,21 @@ internal static class ParityDiffer
         (new Regex(@"[A-Z]:\\+(?:[^\\""]+\\+)*(?:workspace|CopilotConnectorWorkflow)\\+[^""\\]*(?:\\+[^""\\]*)*", RegexOptions.Compiled | RegexOptions.IgnoreCase), "<WORKSPACE_PATH>"),
         // Absolute POSIX paths under workspace or CopilotConnectorWorkflow.
         (new Regex(@"/(?:[^/\s]+/)*(?:workspace|CopilotConnectorWorkflow)/[^\s""]*", RegexOptions.Compiled), "<WORKSPACE_PATH>"),
-        // Random job-id-style hex (8+ hex chars stranded between non-hex).
-        (new Regex(@"\b[0-9a-f]{8,}\b", RegexOptions.Compiled), "<HEX_ID>"),
-        // GUIDs.
+        // GUIDs (RFC-4122 8-4-4-4-12).
         (new Regex(@"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", RegexOptions.Compiled | RegexOptions.IgnoreCase), "<GUID>"),
+        // NOTE: previous versions had a broad `\b[0-9a-f]{8,}\b` HEX_ID rule
+        // here. It was removed (Opus Phase 8 BLOCKER 2 + GPT Phase 8 BLOCKER 2)
+        // because:
+        //   1. It silently masks pinned-commit SHAs (plan §5 reproducibility
+        //      contract for EvalToolkit version-pinning) — drift would NOT be
+        //      caught by the harness.
+        //   2. It silently masks `inputsHash`/`outputs`/`datasetHash`/
+        //      `evalSetHash` SHA-256 hash fields in `job.json` and scored
+        //      reports — those are EXACTLY what plan §4.8 says the harness
+        //      must diff.
+        // Callers that need to mask their own random IDs should pass a
+        // path-specific allowlist via the `extraAllowlist` parameter on
+        // `Diff` rather than rely on a fragile global regex.
     ];
 
     /// <summary>Default classifier: rules of thumb for which mode each file
@@ -87,6 +106,33 @@ internal static class ParityDiffer
         if (rel.EndsWith("agent-response-scores.json", StringComparison.OrdinalIgnoreCase)) return ParityDiffMode.CanonicalJson;
         if (rel.EndsWith(".evalgen.json", StringComparison.OrdinalIgnoreCase)) return ParityDiffMode.CanonicalJson;
         if (rel.EndsWith("compare-report.json", StringComparison.OrdinalIgnoreCase)) return ParityDiffMode.CanonicalJson;
+
+        // GPT Phase 8 IMPORTANT 5: additional semantic JSON the orchestrator
+        // emits at step boundaries. Treat as canonical so key-order /
+        // trailing-newline / STJ vs JSON.stringify whitespace differences
+        // don't trip parity.
+        if (rel.EndsWith("/connector-schema.json", StringComparison.OrdinalIgnoreCase)
+            || rel.EndsWith("\\connector-schema.json", StringComparison.OrdinalIgnoreCase)
+            || rel.EndsWith("schema-validation.json", StringComparison.OrdinalIgnoreCase)
+            || rel.EndsWith("/resources.json", StringComparison.OrdinalIgnoreCase)
+            || rel.EndsWith("\\resources.json", StringComparison.OrdinalIgnoreCase))
+        {
+            return ParityDiffMode.CanonicalJson;
+        }
+
+        // Opus Phase 8 IMPORTANT 2: rendered connector-project subtree
+        // gets `npm install` + `tsc` run over it, and npm opportunistically
+        // rewrites package.json (whitespace, EOL, optional field reorder)
+        // + tsconfig outputs vary by TS version. Treat them as canonical
+        // JSON inside that subtree only. Top-level orchestrator
+        // package.json (none today, but defensive) stays byte-exact.
+        if (rel.Contains("/connector-project/", StringComparison.OrdinalIgnoreCase)
+            || rel.Contains("/connector-project-", StringComparison.OrdinalIgnoreCase))
+        {
+            if (rel.EndsWith("package.json", StringComparison.OrdinalIgnoreCase)) return ParityDiffMode.CanonicalJson;
+            if (rel.EndsWith("tsconfig.json", StringComparison.OrdinalIgnoreCase)) return ParityDiffMode.CanonicalJson;
+            if (Regex.IsMatch(rel, @"/tsconfig\.[^/]+\.json$", RegexOptions.IgnoreCase)) return ParityDiffMode.CanonicalJson;
+        }
 
         // Everything else (rendered TS, YAML, MD, scripts, templates) →
         // byte-exact. CRLF/LF drift is caught here because we intentionally

@@ -88,10 +88,19 @@ Pick the smallest dataset under `data/` (e.g. `data/ngo-environment/`).
 - [ ] Add to PATH (per portable README).
 - [ ] Open a NEW terminal, run `ccw --help` -> renders.
 - [ ] Run `ccw tools` -> all installed CLIs detected.
-- [ ] Run `ccw diagnostics` -> JSON report emits; `allOk: true`.
+- [ ] Run `ccw diagnostics` -> JSON report emits; `allOk: true`. JSON
+      includes a `tools` inventory section (templates root + EvalGen /
+      EvalScore / enhancer paths) plus a `dependencies` section; both
+      MUST be OK for `allOk` to be `true`. Save the report for archival.
 - [ ] Run `ccw run --file ...` on the same dataset; compare scored
-      report bytes against the WinUI run from step D (allowlist
-      timestamps, paths, IDs - use `ParityDiffer`).
+      report bytes against the WinUI run from step D using the parity
+      harness: `dotnet test winui3/tests/Ccw.Parity.Tests --filter
+      "FullyQualifiedName~Cross"` AFTER setting
+      `CCW_PARITY_RUN_FIXTURES=1` and `CCW_PARITY_FIXTURE_A=<winui-job-dir>`
+      `CCW_PARITY_FIXTURE_B=<cli-job-dir>`. If the cross-fixture test is
+      not yet wired (Phase 8 ships the harness, not the cross-fixture
+      gate), fall back to spot-checking that `scored-report.md`'s
+      "Overall accuracy" headline matches.
 
 ## F. `winget configure` bulk path
 
