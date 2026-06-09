@@ -13,21 +13,25 @@
   </ItemGroup>
 
   <!--
-    Phase 7 (MSIX packaging) wires up the EmbeddedResource glob below.
+    Phase 7 MSIX packaging — templates ship as Content alongside the
+    assembly so MSIX (and `dotnet publish`) pick them up automatically.
     Opus I5 requires `templates/` to ship as RAW BYTES so CRLF/LF drift
     can't break snapshot parity against the Node renderer. The
-    `.gitattributes` at the repo root pins EOLs under `templates/` so any
-    conversion is caught at commit time.
+    `.gitattributes` at the repo root pins EOLs under `templates/` so
+    any conversion is caught at commit time.
 
-    Kept commented out at Phase 0 so the empty project builds cleanly
-    until the Phase 1g `Ccw.Core.Templating` consumer exists to bind to.
+    The Templater (Ccw.Core.Templating.Templater) operates on file paths
+    rooted at `TemplatesInfo.TemplatesRoot` (== AppContext.BaseDirectory
+    + "templates"), so this Content include is what makes the runtime
+    template directory exist next to CcwUI.exe / ccw.exe inside the
+    MSIX or portable ZIP.
   -->
-  <!--
   <ItemGroup>
-    <EmbeddedResource Include="..\..\..\templates\**\*">
-      <LogicalName>Ccw.Templates.%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
-    </EmbeddedResource>
+    <Content Include="..\..\..\templates\**\*"
+             Link="templates\%(RecursiveDir)%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest"
+             Visible="false" />
   </ItemGroup>
-  -->
 
 </Project>

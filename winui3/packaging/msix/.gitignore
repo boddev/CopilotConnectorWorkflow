@@ -1,0 +1,4 @@
+dist/
+*.pfx
+*.password.txt
+azure-signing/metadata.json

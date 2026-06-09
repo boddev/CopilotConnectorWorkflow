@@ -1,0 +1,71 @@
+# yaml-language-server: $schema=https://aka.ms/configuration-dsc-schema/0.2
+#
+# Phase 7 §6 - winget configure file for CopilotConnectorWorkflow.
+#
+# This DSC configuration provisions every external CLI dependency that
+# the CCW pipeline shells out to (probed by Ccw.Bootstrap.DependencyProbes
+# and surfaced in the first-run wizard). It's published as a release
+# asset alongside the MSIX so enterprise admins / new users can run a
+# one-shot:
+#
+#   winget configure --file ccw-deps.dsc.winget.yaml
+#
+# ...before installing the MSIX. The MSIX itself does NOT auto-install
+# these because:
+#   - MSIX packages cannot elevate to install global tools.
+#   - Most enterprises want consent + audit for each tool install.
+#   - The wizard inside CCW handles per-tool installs interactively for
+#     individual users; this YAML is the bulk/headless complement.
+#
+# Reference: https://learn.microsoft.com/windows/package-manager/configuration/
+properties:
+  resources:
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      id: nodeLts
+      directives:
+        description: Install Node.js LTS (>= 22) - required by Steps 2 and 6.
+        allowPrerelease: false
+      settings:
+        id: OpenJS.NodeJS.LTS
+        source: winget
+        ensure: Present
+
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      id: git
+      directives:
+        description: Install Git for Windows - required by `ccw bootstrap clone` of sibling repos.
+        allowPrerelease: false
+      settings:
+        id: Git.Git
+        source: winget
+        ensure: Present
+
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      id: azureCli
+      directives:
+        description: Install Azure CLI - required by Step 4 connector deploy.
+        allowPrerelease: false
+      settings:
+        id: Microsoft.AzureCLI
+        source: winget
+        ensure: Present
+
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      id: githubCli
+      directives:
+        description: Install GitHub CLI - required by Step 6 GitHub Copilot judge (gh-copilot extension lives here).
+        allowPrerelease: false
+      settings:
+        id: GitHub.cli
+        source: winget
+        ensure: Present
+
+  # The gh-copilot extension is NOT a WinGet package; install it via
+  # `gh extension install github/gh-copilot` AFTER `gh` is on PATH. The
+  # first-run wizard in CCW prompts for this with a one-click button.
+  # winget configure does not currently have a first-class
+  # post-resource scripting hook, so we surface this as a documented
+  # manual step in the matching README rather than smuggle it in via a
+  # PowerShell resource (which would force trust on the script payload).
+
+  configurationVersion: 0.2.0
