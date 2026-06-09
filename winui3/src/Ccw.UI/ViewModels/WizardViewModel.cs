@@ -298,6 +298,16 @@ public partial class WizardProbeRow : ObservableObject
     public string? ManualCommand { get; }
     public bool HasManualLink => !string.IsNullOrEmpty(ManualLink);
 
+    /// <summary>NavigateUri-safe view of <see cref="ManualLink"/>. Binding a
+    /// nullable string straight to HyperlinkButton.NavigateUri (a Uri) makes
+    /// the compiled x:Bind call XamlBindingHelper.ConvertValue(typeof(Uri),
+    /// value); when the value is null or not an absolute URI that throws
+    /// E_INVALIDARG across the WinRT boundary and fail-fasts the process.
+    /// Exposing a real Uri means no string-&gt;Uri conversion happens and a
+    /// null link is simply "no navigation".</summary>
+    public Uri? ManualLinkUri =>
+        Uri.TryCreate(ManualLink, UriKind.Absolute, out var uri) ? uri : null;
+
     [ObservableProperty] public partial string Status { get; set; }
     [ObservableProperty] public partial bool Busy { get; set; }
 }
