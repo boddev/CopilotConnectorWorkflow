@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="Ccw.UI.Views.NewJobPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer Padding="24">
+        <StackPanel Spacing="12" MaxWidth="640" HorizontalAlignment="Left">
+            <TextBlock Text="New job" FontSize="22" FontWeight="SemiBold"/>
+            <TextBlock TextWrapping="Wrap"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       Text="Configure a CCW pipeline. Today this scaffolds the job record; running the full pipeline from the UI lands as the New Job form (plan §5b) once the v1 enhancer shim path completes. Until then, use ccw.exe to run the pipeline." />
+
+            <TextBlock Text="Dataset path" FontWeight="SemiBold"/>
+            <TextBox x:Name="DatasetBox" PlaceholderText="C:\path\to\dataset (folder or .csv)"/>
+
+            <TextBlock Text="Description" FontWeight="SemiBold"/>
+            <TextBox x:Name="DescriptionBox" PlaceholderText="A short purpose for this connector"
+                     AcceptsReturn="True" TextWrapping="Wrap" Height="80"/>
+
+            <TextBlock Text="Connector ID" FontWeight="SemiBold"/>
+            <TextBox x:Name="ConnectorIdBox" PlaceholderText="lowercase-with-dashes"/>
+
+            <TextBlock Text="Connector display name" FontWeight="SemiBold"/>
+            <TextBox x:Name="ConnectorNameBox" PlaceholderText="My Connector"/>
+
+            <TextBlock Text="Deploy target" FontWeight="SemiBold"/>
+            <ComboBox x:Name="DeployTargetBox" SelectedIndex="0">
+                <ComboBoxItem Content="azure-functions"/>
+                <ComboBoxItem Content="azure-container-apps"/>
+                <ComboBoxItem Content="both"/>
+            </ComboBox>
+
+            <CheckBox x:Name="NoEnhanceBox" Content="Skip Step 2 enhancement (identity transform only)"/>
+
+            <Button Content="Create job record" Click="Create_Click" Margin="0,12,0,0"/>
+            <TextBlock x:Name="StatusText" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

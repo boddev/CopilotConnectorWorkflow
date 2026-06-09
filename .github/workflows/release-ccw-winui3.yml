@@ -1,0 +1,490 @@
+name: Release CCW (WinUI 3)
+
+# CCW Phase 9 plan §4 Phase 9 — Release workflow.
+#
+# Triggers:
+# - push of a tag matching ccw-winui3-v* (signed + published release)
+# - workflow_dispatch from any branch (unsigned dry-run that exercises
+#   build + test + package; skips Azure Trusted Signing and publish; useful
+#   for validating workflow changes before tagging)
+#
+# Release artifacts per plan §4 Phase 9 + §3:
+# - Signed MSIX (x64 + arm64) — installable Windows-native single-project
+#   MSIX with self-contained .NET 10 + Windows App SDK 2.1.x
+# - Signed portable CLI ZIP (x64 + arm64) — ccw-<ver>-win-<arch>.zip
+#   containing the single-file ccw.exe + templates\ subdir
+# - winget configure DSC YAML — packaging/winget-configure/ccw-deps.dsc.winget.yaml
+on:
+  push:
+    tags:
+      - 'ccw-winui3-v*'
+  workflow_dispatch:
+
+# Never cancel a release mid-flight. Partial signing + partial publish
+# would corrupt the release.
+concurrency:
+  group: release-ccw-winui3
+  cancel-in-progress: false
+
+# Workflow-wide default is read-only; per-job grants escalate to
+# id-token:write (for OIDC) and contents:write (for gh release).
+permissions:
+  contents: read
+
+env:
+  # Pin Trusted Signing dlib NuGet package to a known-good version so CI
+  # is reproducible and the cache key is stable. Bump deliberately when
+  # validating a new client.
+  ARTIFACT_SIGNING_VERSION: '1.0.128'
+
+jobs:
+  # ----------------------------------------------------------------------
+  # Job 1: Build + test + package unsigned MSIX (x64 + arm64) +
+  # portable CLI ZIP (x64 + arm64). Runs on every trigger so
+  # workflow_dispatch can produce dry-run artifacts without Azure auth.
+  # ----------------------------------------------------------------------
+  build:
+    name: Build + package ${{ matrix.arch }}
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+
+    defaults:
+      run:
+        working-directory: winui3
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.300
+
+      - name: dotnet restore
+        run: dotnet restore CopilotConnectorWorkflow.slnx
+
+      - name: dotnet build
+        run: dotnet build CopilotConnectorWorkflow.slnx --no-restore --configuration Release
+
+      # Tests are arch-neutral (xUnit, parity harness). Run once on x64
+      # only; re-running on arm64 would double CI time without catching
+      # anything new.
+      - name: dotnet test
+        if: matrix.arch == 'x64'
+        run: dotnet test CopilotConnectorWorkflow.slnx --no-build --configuration Release --logger "trx;LogFileName=test-results.trx"
+
+      - name: Build MSIX (${{ matrix.arch }})
+        shell: pwsh
+        run: pwsh ./packaging/msix/build-msix.ps1 -Arch ${{ matrix.arch }} -SkipAssets
+
+      - name: Build portable CLI ZIP (${{ matrix.arch }})
+        shell: pwsh
+        run: pwsh ./packaging/portable/build-cli-zip.ps1 -Rid win-${{ matrix.arch }}
+
+      - name: Verify unsigned MSIX structure
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $arch = '${{ matrix.arch }}'
+          $msix = Get-ChildItem ./packaging/msix/dist/$arch/*.msix |
+                    Where-Object Name -notlike '*signed*' |
+                    Select-Object -First 1
+          if (-not $msix) { throw "No unsigned MSIX produced under packaging/msix/dist/$arch/" }
+          $sdkBin = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+          $makeAppx = Get-ChildItem -Path $sdkBin -Filter 'makeappx.exe' -Recurse -ErrorAction SilentlyContinue |
+                        Where-Object FullName -like '*\x64\*' |
+                        Sort-Object { [version](Split-Path (Split-Path $_.FullName -Parent) -Parent | Split-Path -Leaf) } -Descending |
+                        Select-Object -First 1
+          if (-not $makeAppx) { throw "No makeappx.exe found under $sdkBin" }
+          $tmp = New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP/msix-verify-$([guid]::NewGuid())"
+          & $makeAppx.FullName unpack /p $msix.FullName /d $tmp.FullName /nv | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "makeappx unpack failed (exit $LASTEXITCODE)" }
+          [xml]$mf = Get-Content (Join-Path $tmp.FullName 'AppxManifest.xml') -Raw
+          if ($mf.Package.Identity.ProcessorArchitecture -ne $arch) {
+            throw "Expected ProcessorArchitecture=$arch, got '$($mf.Package.Identity.ProcessorArchitecture)'"
+          }
+          # Opus Phase 9 IMPORTANT 8: assert Identity.Name matches the
+          # canonical package id. The PR gate has this; the release one
+          # didn't, and the release artefact is the one users install.
+          $expectedId = 'CopilotConnectorWorkflow.WinUI'
+          if ($mf.Package.Identity.Name -ne $expectedId) {
+            throw "Expected AppxManifest Identity.Name='$expectedId', got '$($mf.Package.Identity.Name)'. A drifted package id would break in-place upgrade for existing installs."
+          }
+          if (-not (Test-Path (Join-Path $tmp.FullName 'CcwUI.exe'))) {
+            throw 'CcwUI.exe missing at MSIX root'
+          }
+          if (-not (Test-Path (Join-Path $tmp.FullName 'templates'))) {
+            throw 'templates\ subdir missing at MSIX root'
+          }
+          Write-Host "OK: unsigned MSIX is structurally valid (arch=$arch, Identity.Name=$expectedId, CcwUI.exe + templates\ present)"
+
+      - name: Upload unsigned MSIX
+        uses: actions/upload-artifact@v4
+        with:
+          name: ccw-msix-${{ matrix.arch }}-unsigned
+          path: winui3/packaging/msix/dist/${{ matrix.arch }}/*.msix
+          if-no-files-found: error
+
+      - name: Upload portable CLI ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: ccw-cli-${{ matrix.arch }}-portable
+          path: winui3/packaging/portable/dist/*${{ matrix.arch }}.zip
+          if-no-files-found: error
+
+      - name: Upload test results (x64 only)
+        if: always() && matrix.arch == 'x64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ccw-test-results
+          path: winui3/**/TestResults/*.trx
+          if-no-files-found: warn
+
+  # ----------------------------------------------------------------------
+  # Job 2: Sign each unsigned MSIX + each portable CLI ZIP's inner
+  # ccw.exe via Azure Trusted Signing. Only runs on tag pushes.
+  # workflow_dispatch from a branch stops at `build`.
+  #
+  # environment:release ensures the OIDC subject claim matches the
+  # configured Entra federated identity credential. Standard Entra
+  # federated identity credentials require exact subject match — no
+  # wildcard. The repo's `release` environment is gated to tags matching
+  # ccw-winui3-v*, and the FIC is configured with subject
+  # `repo:boddev/CopilotConnectorWorkflow:environment:release`. See
+  # winui3/docs/ci-release-setup.md.
+  # ----------------------------------------------------------------------
+  sign:
+    name: Sign ${{ matrix.arch }}
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/ccw-winui3-v')
+    runs-on: windows-2022
+    environment: release
+
+    permissions:
+      contents: read
+      id-token: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+
+    defaults:
+      run:
+        working-directory: winui3
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download unsigned MSIX
+        uses: actions/download-artifact@v4
+        with:
+          name: ccw-msix-${{ matrix.arch }}-unsigned
+          path: winui3/packaging/msix/dist/${{ matrix.arch }}/
+
+      - name: Download unsigned portable CLI ZIP
+        uses: actions/download-artifact@v4
+        with:
+          name: ccw-cli-${{ matrix.arch }}-portable
+          path: winui3/packaging/portable/dist/
+
+      - name: Set up NuGet CLI
+        uses: NuGet/setup-nuget@v2
+
+      - name: Cache Microsoft.ArtifactSigning.Client NuGet package
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages/microsoft.artifactsigning.client
+          key: artifact-signing-client-${{ env.ARTIFACT_SIGNING_VERSION }}
+
+      - name: Install Microsoft.ArtifactSigning.Client (pinned)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dest = Join-Path $env:USERPROFILE '.nuget/packages'
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          nuget install Microsoft.ArtifactSigning.Client `
+                  -Version $env:ARTIFACT_SIGNING_VERSION `
+                  -ExcludeVersion `
+                  -OutputDirectory $dest `
+                  -NonInteractive
+          if ($LASTEXITCODE -ne 0) { throw "nuget install Microsoft.ArtifactSigning.Client failed (exit $LASTEXITCODE)" }
+
+      - name: Azure login (OIDC federated identity)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Write Trusted Signing metadata.json
+        shell: pwsh
+        env:
+          TS_ENDPOINT: ${{ vars.TRUSTED_SIGNING_ENDPOINT }}
+          TS_ACCOUNT:  ${{ vars.TRUSTED_SIGNING_ACCOUNT_NAME }}
+          TS_PROFILE:  ${{ vars.TRUSTED_SIGNING_PROFILE_NAME }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $meta = @{
+            Endpoint               = $env:TS_ENDPOINT
+            CodeSigningAccountName = $env:TS_ACCOUNT
+            CertificateProfileName = $env:TS_PROFILE
+          } | ConvertTo-Json
+          New-Item -ItemType Directory -Force -Path ./packaging/msix/azure-signing | Out-Null
+          Set-Content -Path ./packaging/msix/azure-signing/metadata.json -Value $meta -Encoding utf8
+
+      - name: Sign MSIX (Azure Trusted Signing)
+        shell: pwsh
+        env:
+          TS_PUBLISHER: ${{ vars.TRUSTED_SIGNING_PUBLISHER }}
+          MATRIX_ARCH:  ${{ matrix.arch }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $arch = $env:MATRIX_ARCH
+          $msix = Get-ChildItem ./packaging/msix/dist/$arch/*.msix |
+                    Where-Object Name -notlike '*signed*' |
+                    Select-Object -First 1
+          if (-not $msix) { throw "No unsigned MSIX to sign in packaging/msix/dist/$arch/" }
+          pwsh ./packaging/msix/sign-msix.ps1 `
+                -MsixPath $msix.FullName `
+                -Mode AzureTrustedSigning `
+                -SigningPublisher $env:TS_PUBLISHER `
+                -TrustedSigningMetadataPath ./packaging/msix/azure-signing/metadata.json
+          if ($LASTEXITCODE -ne 0) { throw "sign-msix.ps1 failed (exit $LASTEXITCODE)" }
+
+      - name: Sign portable CLI ZIP contents (Azure Trusted Signing)
+        shell: pwsh
+        env:
+          MATRIX_ARCH: ${{ matrix.arch }}
+        run: |
+          # Sign the inner ccw.exe via signtool + Trusted Signing dlib, then
+          # repack the ZIP with the signed exe. The portable ZIP itself is
+          # not code-signable (it's a ZIP, not a PE), but Microsoft Defender
+          # SmartScreen + Mark-of-the-Web honour the inner exe signature
+          # when users right-click -> Unblock -> extract.
+          $ErrorActionPreference = 'Stop'
+          $arch = $env:MATRIX_ARCH
+          $zip = Get-ChildItem ./packaging/portable/dist/ccw-*-win-$arch.zip | Select-Object -First 1
+          if (-not $zip) { throw "No portable ZIP under packaging/portable/dist/ for arch=$arch" }
+
+          $work = Join-Path $env:RUNNER_TEMP "ccw-sign-zip-$([guid]::NewGuid())"
+          $extracted = Join-Path $work 'extracted'
+          New-Item -ItemType Directory -Force -Path $extracted | Out-Null
+          Expand-Archive -Path $zip.FullName -DestinationPath $extracted -Force
+
+          $ccwExe = Get-ChildItem -Path $extracted -Filter 'ccw.exe' -Recurse |
+                      Select-Object -First 1
+          if (-not $ccwExe) { throw 'ccw.exe missing from extracted portable ZIP' }
+
+          # Locate signtool + the Trusted Signing dlib (already installed
+          # in previous step). Reuse sign-msix.ps1's discovery convention.
+          $sdkBin = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+          $signtool = Get-ChildItem -Path $sdkBin -Filter 'signtool.exe' -Recurse -ErrorAction SilentlyContinue |
+                        Where-Object FullName -like '*\x64\*' |
+                        Sort-Object LastWriteTime -Descending |
+                        Select-Object -First 1
+          if (-not $signtool) { throw "signtool.exe not found under $sdkBin" }
+          # Opus Phase 9 IMPORTANT 2: resolve the Trusted Signing dlib
+          # via recursive discovery — the same convention sign-msix.ps1
+          # uses for MSIX signing. The dll's exact subpath inside the
+          # NuGet package has historically been `bin/x64/` but a future
+          # client-tools rev could change it; hardcoding one candidate
+          # would silently break the ZIP leg while the MSIX leg keeps
+          # working.
+          $nugetRoot = Join-Path $env:USERPROFILE '.nuget/packages'
+          $dlib = Get-ChildItem -Path $nugetRoot -Filter 'Azure.CodeSigning.Dlib.dll' -Recurse -ErrorAction SilentlyContinue |
+                    Where-Object FullName -like '*\x64\*' |
+                    Select-Object -First 1
+          if (-not $dlib) {
+            throw "Trusted Signing dlib (Azure.CodeSigning.Dlib.dll, x64) not found under $nugetRoot. Did the 'Install Microsoft.ArtifactSigning.Client' step succeed? ARTIFACT_SIGNING_VERSION=$($env:ARTIFACT_SIGNING_VERSION)"
+          }
+          $dlib = $dlib.FullName
+          Write-Host "Resolved Trusted Signing dlib: $dlib"
+          $metaPath = Resolve-Path ./packaging/msix/azure-signing/metadata.json
+
+          & $signtool.FullName sign `
+              /v `
+              /debug `
+              /fd SHA256 `
+              /tr 'http://timestamp.acs.microsoft.com' `
+              /td SHA256 `
+              /dlib $dlib `
+              /dmdf $metaPath `
+              $ccwExe.FullName
+          if ($LASTEXITCODE -ne 0) { throw "signtool sign of ccw.exe failed (exit $LASTEXITCODE)" }
+
+          # GPT Phase 9 IMPORTANT 5: verify the just-signed exe before
+          # repacking. Catches: timestamp-server outage where the sign
+          # call "succeeded" without a counter-sig, wrong file path
+          # selected for signing, and Authenticode chain breakage.
+          $sig = Get-AuthenticodeSignature -FilePath $ccwExe.FullName
+          if ($sig.Status -ne 'Valid') {
+            throw "Post-sign verification FAILED for $($ccwExe.FullName): status=$($sig.Status), message=$($sig.StatusMessage). Refusing to repack an unsigned/invalidly-signed ccw.exe into the release ZIP."
+          }
+          if (-not $sig.TimeStamperCertificate) {
+            throw "Post-sign verification: ccw.exe has no timestamp counter-signature. The Authenticode signature will expire when the signing cert does. Refusing to publish."
+          }
+          $signerSubject = $sig.SignerCertificate.Subject
+          $expected = $env:TS_PUBLISHER
+          if ($expected -and $signerSubject -notlike "*$expected*") {
+            throw "Post-sign verification: signer subject '$signerSubject' does not contain expected publisher '$expected' (TRUSTED_SIGNING_PUBLISHER var). Wrong cert profile?"
+          }
+          Write-Host "OK: ccw.exe signed by '$signerSubject', timestamp=$($sig.TimeStamperCertificate.Subject)" -ForegroundColor Green
+
+          # Repack the ZIP with the signed exe replacing the unsigned one.
+          $signedZipDir = Join-Path (Split-Path $zip.FullName -Parent) 'signed'
+          New-Item -ItemType Directory -Force -Path $signedZipDir | Out-Null
+          $signedZipPath = Join-Path $signedZipDir $zip.Name
+          if (Test-Path $signedZipPath) { Remove-Item $signedZipPath -Force }
+          Compress-Archive -Path (Join-Path $extracted '*') -DestinationPath $signedZipPath -CompressionLevel Optimal
+          if (-not (Test-Path $signedZipPath)) { throw "Failed to repack signed portable ZIP at $signedZipPath" }
+
+          # Final post-repack verification: re-extract the signed ZIP and
+          # confirm the inner ccw.exe is still validly signed (catches
+          # corruption during recompression or wrong-path inclusion).
+          $verifyDir = Join-Path $env:RUNNER_TEMP "verify-portable-$([guid]::NewGuid())"
+          New-Item -ItemType Directory -Force -Path $verifyDir | Out-Null
+          Expand-Archive -Path $signedZipPath -DestinationPath $verifyDir -Force
+          $innerExe = Get-ChildItem -Path $verifyDir -Filter 'ccw.exe' -Recurse | Select-Object -First 1
+          if (-not $innerExe) { throw "After repack, ccw.exe missing from signed ZIP $signedZipPath" }
+          $innerSig = Get-AuthenticodeSignature -FilePath $innerExe.FullName
+          if ($innerSig.Status -ne 'Valid') {
+            throw "Post-repack verification: inner ccw.exe in $signedZipPath has signature status '$($innerSig.Status)'. Refusing to publish."
+          }
+          Remove-Item -Recurse -Force $verifyDir
+          Write-Host "OK: portable ZIP repacked with signed ccw.exe at $signedZipPath (post-repack signature verified)" -ForegroundColor Green
+
+      - name: Upload signed MSIX
+        uses: actions/upload-artifact@v4
+        with:
+          name: ccw-msix-${{ matrix.arch }}-signed
+          path: winui3/packaging/msix/dist/${{ matrix.arch }}/signed/*.msix
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload signed portable CLI ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: ccw-cli-${{ matrix.arch }}-portable-signed
+          path: winui3/packaging/portable/dist/signed/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  # ----------------------------------------------------------------------
+  # Job 3: Publish GitHub release with signed MSIXes + signed portable
+  # ZIPs + DSC YAML attached. Fails closed if the release already exists
+  # — replacing an existing release would destroy any manually edited
+  # notes / assets.
+  # ----------------------------------------------------------------------
+  publish:
+    name: Publish GitHub release
+    needs: sign
+    if: startsWith(github.ref, 'refs/tags/ccw-winui3-v')
+    runs-on: windows-2022
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all signed MSIXes
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ccw-msix-*-signed
+          path: ./release-artifacts/msix
+
+      - name: Download all signed portable CLI ZIPs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ccw-cli-*-portable-signed
+          path: ./release-artifacts/portable
+
+      - name: Stage winget configure DSC YAML
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $src = './winui3/packaging/winget-configure/ccw-deps.dsc.winget.yaml'
+          if (-not (Test-Path $src)) { throw "DSC YAML missing at $src" }
+          New-Item -ItemType Directory -Force -Path ./release-artifacts/dsc | Out-Null
+          Copy-Item $src ./release-artifacts/dsc/
+
+      - name: Create GitHub release (fail if tag already released)
+        shell: pwsh
+        env:
+          GH_TOKEN:     ${{ github.token }}
+          TAG:          ${{ github.ref_name }}
+          COMMIT_SHA:   ${{ github.sha }}
+          TS_PUBLISHER: ${{ vars.TRUSTED_SIGNING_PUBLISHER }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag    = $env:TAG
+          $title  = "CopilotConnectorWorkflow (WinUI 3) $tag"
+          $msixes    = Get-ChildItem ./release-artifacts/msix     -Recurse -Filter '*.msix' | ForEach-Object { $_.FullName }
+          $portables = Get-ChildItem ./release-artifacts/portable -Recurse -Filter '*.zip'  | ForEach-Object { $_.FullName }
+          $dscs      = Get-ChildItem ./release-artifacts/dsc      -Recurse -Filter '*.yaml' | ForEach-Object { $_.FullName }
+          if ($msixes.Count -lt 2)    { throw "Expected at least 2 MSIXes (x64 + arm64), found $($msixes.Count): $($msixes -join ', ')" }
+          if ($portables.Count -lt 2) { throw "Expected at least 2 portable ZIPs (x64 + arm64), found $($portables.Count): $($portables -join ', ')" }
+          if ($dscs.Count -lt 1)      { throw "Expected at least 1 DSC YAML, found $($dscs.Count)" }
+          $all = @() + $msixes + $portables + $dscs
+
+          # GPT Phase 9 IMPORTANT 4: emit a SHA256SUMS.txt over the
+          # FINAL signed artefacts and attach it to the release. The
+          # in-script hashes captured by build-msix.ps1 / build-cli-zip
+          # .ps1 are stale here because Trusted Signing rewrote the
+          # MSIX, and ZIP repacking changed its bytes too. A consumer
+          # who downloads $tag's .msix / .zip from the release page
+          # has no other way to verify integrity post-download.
+          $sumsPath = Join-Path $env:RUNNER_TEMP 'SHA256SUMS.txt'
+          $sumLines = foreach ($f in $all | Sort-Object) {
+            $h = (Get-FileHash -Algorithm SHA256 -Path $f).Hash.ToLowerInvariant()
+            $name = Split-Path $f -Leaf
+            "$h  $name"
+          }
+          Set-Content -Path $sumsPath -Value $sumLines -Encoding ascii
+          Write-Host "SHA256SUMS.txt:" -ForegroundColor Cyan
+          $sumLines | ForEach-Object { Write-Host "  $_" }
+          $all += $sumsPath
+
+          # Fail-closed against ANY gh failure, not just "release exists".
+          # gh release view exits non-zero for "not found" AND for
+          # transient errors (auth, 5xx, rate limit). Only treat exit 0
+          # OR an explicit "not found" stderr as decisive.
+          $viewOut = & gh release view $tag 2>&1
+          $viewExit = $LASTEXITCODE
+          if ($viewExit -eq 0) {
+            throw "Release '$tag' already exists. Delete it manually via the GitHub UI (or 'gh release delete $tag --yes') and re-run, or push a new tag."
+          }
+          $viewText = ($viewOut | Out-String)
+          if ($viewText -notmatch '(?i)release not found|HTTP 404|not found') {
+            throw "Could not determine whether release '$tag' exists. gh exited $viewExit with: $viewText"
+          }
+          $notes = @"
+          Automated release for $tag.
+
+          Signed via Azure Trusted Signing (Publisher: ``$($env:TS_PUBLISHER)``).
+          Each MSIX is self-contained and includes the .NET 10 runtime + Windows App SDK 2.1.x.
+
+          ## Install (MSIX)
+          ``````pwsh
+          Add-AppxPackage -Path CopilotConnectorWorkflow.WinUI_*_x64.msix
+          ``````
+
+          ## Portable CLI (signed ZIP)
+          Extract ``ccw-*-win-x64.zip`` to any folder, add to PATH, then ``ccw --help``.
+
+          ## Pre-launch dependency provisioning (optional)
+          ``````pwsh
+          winget configure --file ccw-deps.dsc.winget.yaml
+          ``````
+          "@
+          gh release create $tag `
+                  --target $env:COMMIT_SHA `
+                  --title $title `
+                  --notes $notes `
+                  --latest `
+                  @all
+          if ($LASTEXITCODE -ne 0) { throw "gh release create $tag failed (exit $LASTEXITCODE)" }

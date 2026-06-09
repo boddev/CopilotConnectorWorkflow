@@ -1,0 +1,142 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Phase 5 — WinUI 3 head for the CopilotConnectorWorkflow native port.
+    Mirrors the eval-ui-winui3 sibling: .NET 10 + Windows App SDK 2.1.x,
+    self-contained runtime + WinAppSDK, packaged as single-project MSIX
+    (Phase 7). Unpackaged local F5 / dotnet build / dotnet run works
+    because WindowsPackageType defaults to None — the packaging slice
+    flips it to MSIX on release builds.
+
+    DisableXamlGeneratedMain=true so Program.cs owns [STAThread] Main.
+    We need to register the AppInstance single-instance lock BEFORE the
+    XAML runtime spins up so a double-click on a `.ccwjob` file lands
+    on the already-running window rather than spawning a duplicate
+    (plan §5g).
+  -->
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RootNamespace>Ccw.UI</RootNamespace>
+    <AssemblyName>CcwUI</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Platforms>x64;arm64</Platforms>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+
+    <UseWinUI>true</UseWinUI>
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <WindowsPackageType>None</WindowsPackageType>
+
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>preview</LangVersion>
+
+    <DisableXamlGeneratedMain>true</DisableXamlGeneratedMain>
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+
+    <!-- DI-style services intentionally instance-based (constructed by ServiceContainer); CA1822 noise. -->
+    <NoWarn>$(NoWarn);CA1822</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" />
+    <PackageReference Include="CommunityToolkit.Mvvm" />
+    <PackageReference Include="Markdig" />
+    <!--
+      Phase 7 MSIX packaging — pin System.Security.Permissions 8.0.0
+      because the WinAppSdkValidateAppxManifestItems MSBuild task
+      ships in tools\net6.0\Microsoft.Windows.SDK.BuildTools.MSIX.dll
+      and binds to System.Security.Permissions 8.0.0 — which is NOT
+      in the .NET 10 SDK's default task host probing path. Without
+      this explicit reference, /p:WindowsPackageType=MSIX fails with
+      MSB4018 FileNotFoundException for System.Security.Permissions.
+      GeneratePathProperty=true exposes $(PkgSystem_Security_Permissions)
+      so _CcwEnsureMsixTaskSysPerm below can copy the assembly next
+      to the MSIX task DLL. PrivateAssets=all keeps it out of the
+      app's runtime closure (it's consumed only by the validate task).
+      Sibling pattern: eval-ui-winui3 slice 33.
+    -->
+    <PackageReference Include="System.Security.Permissions"
+                     GeneratePathProperty="true"
+                     PrivateAssets="all"
+                     ExcludeAssets="runtime;native;contentFiles;analyzers;buildTransitive" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Ccw.Core\Ccw.Core.csproj" />
+    <ProjectReference Include="..\Ccw.Steps\Ccw.Steps.csproj" />
+    <ProjectReference Include="..\Ccw.Bootstrap\Ccw.Bootstrap.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Manifest Include="$(ApplicationManifest)" />
+  </ItemGroup>
+
+  <!-- Phase 7 MSIX wiring (mirrors sibling — only active when packaging). -->
+  <ItemGroup Condition="'$(WindowsPackageType)'=='MSIX'">
+    <AppxManifest Include="Package.appxmanifest">
+      <SubType>Designer</SubType>
+    </AppxManifest>
+    <Content Include="Assets\Packaging\**\*.png" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <PropertyGroup Condition="'$(WindowsPackageType)'=='MSIX'">
+    <GenerateAppxPackageOnBuild>true</GenerateAppxPackageOnBuild>
+    <AppxPackageSigningEnabled>false</AppxPackageSigningEnabled>
+    <AppxBundle>Never</AppxBundle>
+    <AppxPackageDir>$(MSBuildProjectDirectory)\AppPackages\</AppxPackageDir>
+  </PropertyGroup>
+
+  <!--
+    Phase 7 MSIX packaging — workaround for the missing
+    System.Security.Permissions 8.0.0 in the MSBuild task-host probing
+    path under .NET 10. The WinAppSdkValidateAppxManifestItems task
+    (shipped in Microsoft.Windows.SDK.BuildTools.MSIX 1.x
+    tools\net6.0\) binds to System.Security.Permissions 8.0.0 but the
+    package does not ship that assembly alongside it. Copy the
+    restored assembly next to the task DLL before the validate
+    target runs, so the assembly load resolves locally. Sibling
+    pattern: eval-ui-winui3 _EvalToolkitEnsureMsixTaskSysPerm.
+
+    Conditioned on WindowsPackageType=MSIX so unpackaged builds
+    (which don't run the task) skip the copy entirely.
+  -->
+  <Target Name="_CcwEnsureMsixTaskSysPerm"
+          BeforeTargets="_ValidatePresenceOfAppxManifestItems"
+          Condition="'$(WindowsPackageType)'=='MSIX' And '$(MSBuildRuntimeType)'=='Core' And '$(MsixTaskAssemblyLocation)'!=''">
+    <PropertyGroup>
+      <_SysPermAssemblyPath>$(PkgSystem_Security_Permissions)\lib\net8.0\System.Security.Permissions.dll</_SysPermAssemblyPath>
+    </PropertyGroup>
+
+    <Error Text="Phase 7 MSIX prerequisite missing: '$(_SysPermAssemblyPath)' not found. Run 'dotnet restore' against Ccw.UI.csproj so the System.Security.Permissions 8.0.0 package is materialised, then retry. See packaging/msix/README.md for context."
+           Condition="!Exists('$(_SysPermAssemblyPath)')" />
+
+    <ItemGroup>
+      <_SysPermAssembly Include="$(_SysPermAssemblyPath)" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_SysPermAssembly)"
+          DestinationFolder="$(MsixTaskAssemblyLocation)"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <!--
+    Opus Phase 7 review IMPORTANT 1: the workaround above is gated on
+    MsixTaskAssemblyLocation being non-empty. If a future Windows App
+    SDK upgrade renames that property or sets it later in the build, the
+    target silently no-ops and the MSB4018 FileNotFoundException
+    reappears at MSIX build time. Fail loudly instead.
+  -->
+  <Target Name="_CcwGuardMsixTaskAssemblyLocation"
+          BeforeTargets="_ValidatePresenceOfAppxManifestItems"
+          Condition="'$(WindowsPackageType)'=='MSIX' And '$(MSBuildRuntimeType)'=='Core'">
+    <Error Text="Phase 7 MSIX prerequisite missing: MsixTaskAssemblyLocation is not set, so _CcwEnsureMsixTaskSysPerm cannot copy System.Security.Permissions next to the WinAppSdkValidateAppxManifestItems task DLL. The Windows App SDK MSBuild integration may have changed the property name or its evaluation order. Investigate $(MSBuildProjectFullPath) under 'msbuild /pp' and update _CcwEnsureMsixTaskSysPerm + _CcwGuardMsixTaskAssemblyLocation accordingly."
+           Condition="'$(MsixTaskAssemblyLocation)'==''" />
+  </Target>
+
+</Project>

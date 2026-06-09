@@ -74,6 +74,14 @@ public sealed record RunOptions
     /// <summary>Optional sink for live log streaming. Backpressure-safe.</summary>
     public ChannelWriter<LogLine>? LogSink { get; init; }
 
+    /// <summary>If true (the historical default), <see cref="ProcessRunner.RunAsync"/>
+    /// calls <c>TryComplete()</c> on <see cref="LogSink"/> when the process exits so a
+    /// per-process consumer can drain to EOF. The orchestrator (Phase 4) shares ONE
+    /// sink across the whole pipeline; in that case the caller owns the sink lifetime
+    /// and must set this to false, otherwise the first shimmed step closes the channel
+    /// and later step logs are dropped. (GPT BLOCKER review of Phase 4.)</summary>
+    public bool CompleteLogSinkOnExit { get; init; } = true;
+
     /// <summary>Optional label prefixed onto emitted log events.</summary>
     public string? Label { get; init; }
 
@@ -266,7 +274,13 @@ public static class ProcessRunner
             // Always complete the sink so awaiting consumers wake up,
             // even on cancellation or unexpected exception
             // (GPT BLOCKER fix). TryComplete is a no-op if already done.
-            sink?.TryComplete();
+            // EXCEPTION: when the caller (e.g. the orchestrator) shares a
+            // single sink across multiple processes, leaving completion to
+            // the caller. Opt-out via CompleteLogSinkOnExit=false.
+            if (opts.CompleteLogSinkOnExit)
+            {
+                sink?.TryComplete();
+            }
         }
     }
 
@@ -359,17 +373,118 @@ public static class ProcessRunner
 
     private static string BuildShellCommand(string cmd, IReadOnlyList<string> args)
     {
+        // Windows shell-mode quoting (GPT Phase 2 BLOCKER #5, plus Phase-2
+        // closure follow-up BLOCKER #1 — cmd itself must go through
+        // CRT/CreateProcess quoting too, otherwise a path like
+        // "C:\Program Files\node\npm.cmd" splits on the space inside the
+        // shell-composed command line).
+        //
+        // KNOWN GOTCHA (Opus Phase-2 closure I-3): `^%` does NOT suppress
+        // %VAR% expansion under `cmd /c`. Caret can't escape percent, and
+        // `%%` only works inside batch files. If a caller passes an argument
+        // containing a defined env-var token (e.g. a path with `%TEMP%`), it
+        // will silently expand. The mitigation in Phase 4+ is to call node
+        // directly (not via the cmd shim path) whenever possible, and to
+        // document this for any path that DOES go through here.
+        //
+        // We pass `cmd.exe /d /s /c "<cmdline>"` and rely on .NET to
+        // double-quote the whole `<cmdline>` block (because we add it
+        // via ArgumentList). Inside that block, each token needs:
+        //   1. CreateProcess-style quoting so the child program's
+        //      own argv parser sees one argument per token.
+        //   2. Caret-escaping of cmd.exe metacharacters
+        //      (&, |, <, >, ^, %) outside the quoted runs.
         if (args.Count == 0)
         {
-            return cmd;
+            return CmdEscape(EscapeForCreateProcess(cmd));
         }
 
-        var sb = new StringBuilder(cmd);
-        foreach (var a in args)
+        var sb = new StringBuilder();
+        sb.Append(CmdEscape(EscapeForCreateProcess(cmd)));
+        foreach (var arg in args)
         {
-            sb.Append(' ').Append(a);
+            sb.Append(' ');
+            sb.Append(CmdEscape(EscapeForCreateProcess(arg)));
         }
+        return sb.ToString();
+    }
 
+    /// <summary>Builds a Windows shell command line. Public for tests so
+    /// they can pin the full composed command, not just the individual
+    /// helpers (GPT Phase-2 closure follow-up).</summary>
+    internal static string BuildShellCommandForTests(string cmd, IReadOnlyList<string> args)
+        => BuildShellCommand(cmd, args);
+
+    /// <summary>Windows CreateProcess command-line quoting per the canonical
+    /// rule set (also documented as "C runtime command-line argument" rules):
+    /// quote if the arg contains whitespace, tab, or a literal quote; double
+    /// any backslashes that precede a literal quote OR the closing quote.
+    /// Internal so tests can pin behavior.</summary>
+    internal static string EscapeForCreateProcess(string arg)
+    {
+        if (arg.Length == 0) return "\"\"";
+
+        var needsQuote = false;
+        foreach (var c in arg)
+        {
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '"')
+            {
+                needsQuote = true;
+                break;
+            }
+        }
+        if (!needsQuote) return arg;
+
+        var sb = new StringBuilder(arg.Length + 2);
+        sb.Append('"');
+        for (var i = 0; i < arg.Length; i++)
+        {
+            var backslashes = 0;
+            while (i < arg.Length && arg[i] == '\\')
+            {
+                backslashes++;
+                i++;
+            }
+
+            if (i == arg.Length)
+            {
+                // Trailing backslashes — double them so they don't escape the closing quote.
+                sb.Append('\\', backslashes * 2);
+                break;
+            }
+            if (arg[i] == '"')
+            {
+                sb.Append('\\', backslashes * 2 + 1);
+                sb.Append('"');
+            }
+            else
+            {
+                sb.Append('\\', backslashes);
+                sb.Append(arg[i]);
+            }
+        }
+        sb.Append('"');
+        return sb.ToString();
+    }
+
+    /// <summary>Caret-escape cmd.exe metacharacters that appear OUTSIDE of
+    /// double-quoted runs. The simple defensive rule: walk the string,
+    /// flip an "inside-quotes" bit on each unescaped quote, and prefix
+    /// metachars outside quotes with ^.</summary>
+    internal static string CmdEscape(string s)
+    {
+        if (s.Length == 0) return s;
+        var sb = new StringBuilder(s.Length + 8);
+        var inQuote = false;
+        foreach (var c in s)
+        {
+            if (c == '"') inQuote = !inQuote;
+            if (!inQuote && (c == '&' || c == '|' || c == '<' || c == '>' || c == '^' || c == '%'))
+            {
+                sb.Append('^');
+            }
+            sb.Append(c);
+        }
         return sb.ToString();
     }
 }

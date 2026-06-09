@@ -1,0 +1,384 @@
+name: Build CCW (WinUI 3)
+
+# CCW Phase 9 plan §4 Phase 9 — PR gate workflow.
+# Runs on every push to main + PR touching either the WinUI port or
+# the shared `templates/` tree (which the WinUI app ships via
+# Ccw.Templates Content-include — drift would silently break parity).
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'winui3/**'
+      - 'templates/**'
+      - '.github/workflows/build-ccw-winui3.yml'
+      - '.github/workflows/release-ccw-winui3.yml'
+  pull_request:
+    paths:
+      - 'winui3/**'
+      - 'templates/**'
+      - '.github/workflows/build-ccw-winui3.yml'
+      - '.github/workflows/release-ccw-winui3.yml'
+
+# Cancel superseded PR runs; release runs in release-ccw-winui3.yml
+# always carry through (cancel-in-progress: false there).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Build / test / smoke only. Release publishing + signing live in
+# release-ccw-winui3.yml so this gate stays read-only.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build, test, and package
+    # Pinned image (windows-2022) so SDK / runtime / signtool paths
+    # don't drift silently mid-release-cycle.
+    runs-on: windows-2022
+
+    defaults:
+      run:
+        working-directory: winui3
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          # Match winui3/global.json exactly to avoid feature-band drift
+          # combined with TreatWarningsAsErrors silently breaking CI.
+          dotnet-version: 10.0.300
+
+      - name: dotnet restore
+        run: dotnet restore CopilotConnectorWorkflow.slnx
+
+      - name: dotnet build
+        run: dotnet build CopilotConnectorWorkflow.slnx --no-restore --configuration Release
+
+      - name: dotnet test
+        run: dotnet test CopilotConnectorWorkflow.slnx --no-build --configuration Release --logger "trx;LogFileName=test-results.trx"
+
+      # Phase 7 packaging slice — smoke-build the unsigned x64 MSIX on
+      # every PR so packaging regressions surface here, not at tag time.
+      # arm64 + signing live in release-ccw-winui3.yml to keep PR runtime
+      # bounded. Opus Phase 7 IMP1 convergent risk: this is the only
+      # codepath that exercises WindowsPackageType=MSIX in CI, so the
+      # _CcwEnsureMsixTaskSysPerm + _CcwGuardMsixTaskAssemblyLocation
+      # targets are validated here on every PR.
+      - name: Build unsigned MSIX (x64 smoke)
+        shell: pwsh
+        run: pwsh ./packaging/msix/build-msix.ps1 -Arch x64 -SkipAssets
+
+      - name: Verify unsigned MSIX structure
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msix = Get-ChildItem ./packaging/msix/dist/x64/*.msix |
+                    Where-Object Name -notlike '*signed*' |
+                    Select-Object -First 1
+          if (-not $msix) { throw 'No unsigned MSIX produced under packaging/msix/dist/x64/' }
+          $sdkBin = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+          $makeAppx = Get-ChildItem -Path $sdkBin -Filter 'makeappx.exe' -Recurse -ErrorAction SilentlyContinue |
+                        Where-Object FullName -like '*\x64\*' |
+                        Sort-Object { [version](Split-Path (Split-Path $_.FullName -Parent) -Parent | Split-Path -Leaf) } -Descending |
+                        Select-Object -First 1
+          if (-not $makeAppx) { throw "No makeappx.exe found under $sdkBin" }
+          $tmp = New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP/msix-verify-$([guid]::NewGuid())"
+          & $makeAppx.FullName unpack /p $msix.FullName /d $tmp.FullName /nv | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "makeappx unpack failed (exit $LASTEXITCODE)" }
+          [xml]$mf = Get-Content (Join-Path $tmp.FullName 'AppxManifest.xml') -Raw
+          if ($mf.Package.Identity.ProcessorArchitecture -ne 'x64') {
+            throw "Expected ProcessorArchitecture=x64, got '$($mf.Package.Identity.ProcessorArchitecture)'"
+          }
+          if ($mf.Package.Identity.Name -ne 'CopilotConnectorWorkflow.WinUI') {
+            throw "Expected Identity.Name=CopilotConnectorWorkflow.WinUI, got '$($mf.Package.Identity.Name)'"
+          }
+          if (-not (Test-Path (Join-Path $tmp.FullName 'CcwUI.exe'))) {
+            throw 'CcwUI.exe missing at MSIX root'
+          }
+          if (-not (Test-Path (Join-Path $tmp.FullName 'templates'))) {
+            throw 'templates\ subdir missing at MSIX root (Phase 7 templates ship via Ccw.Templates Content include)'
+          }
+          Write-Host "OK: unsigned MSIX is structurally valid (arch=x64, CcwUI.exe present, templates\ present)"
+
+      - name: Build portable CLI ZIP (x64 smoke)
+        shell: pwsh
+        run: pwsh ./packaging/portable/build-cli-zip.ps1 -Rid win-x64
+
+      - name: Headless ccw diagnostics smoke (from portable ZIP)
+        shell: pwsh
+        run: |
+          # Plan §4 Phase 8 — `ccw diagnostics` is the headless CI smoke
+          # for the CLI path: exercises ProcessRunner, dependency probes,
+          # and CoreInfo. Exits 0 iff every dep present + meetsMinimum
+          # Version. On windows-2022 hosted runners node + git + gh are
+          # preinstalled; az is via the Azure CLI MSI baked into the
+          # image. If any single dep is missing the exit-code gate flags
+          # it, which is what we want — CI must not green-light a
+          # release with a probe regression.
+          $ErrorActionPreference = 'Stop'
+          $zip = Get-ChildItem ./packaging/portable/dist/*.zip | Select-Object -First 1
+          if (-not $zip) { throw 'No portable ZIP produced under packaging/portable/dist/' }
+          $extractDir = Join-Path $env:RUNNER_TEMP "ccw-portable-$([guid]::NewGuid())"
+          New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+          Expand-Archive -Path $zip.FullName -DestinationPath $extractDir -Force
+          $ccwExe = Get-ChildItem -Path $extractDir -Filter 'ccw.exe' -Recurse |
+                      Select-Object -First 1
+          if (-not $ccwExe) { throw "ccw.exe missing in extracted portable ZIP under $extractDir" }
+          if (-not (Test-Path (Join-Path (Split-Path $ccwExe.FullName -Parent) 'templates'))) {
+            throw 'templates\ subdir missing next to extracted ccw.exe (GPT Phase 7 IMP4 fold-in)'
+          }
+          $diagJson = Join-Path $env:RUNNER_TEMP "diag-$([guid]::NewGuid()).json"
+          & $ccwExe.FullName diagnostics > $diagJson
+          $diagExit = $LASTEXITCODE
+          Write-Host "ccw diagnostics exit code: $diagExit"
+          Get-Content $diagJson -Raw | Write-Host
+          if ($diagExit -ne 0) {
+            # GPT Phase 9 IMPORTANT 2: previously this was soft-fail with
+            # the rationale "deps may be missing on the runner." But
+            # windows-2022 hosted images ship node, git, gh (+ Azure CLI
+            # via WinGet). If `ccw diagnostics` returns non-zero here it's
+            # either (a) a real probe regression, (b) the runner image
+            # changed and we need to update the workflow, or (c) the CLI
+            # itself crashed. In every case the gate must surface it so
+            # we don't merge a probe-layer regression silently.
+            #
+            # Parse the JSON first to give a useful diagnostic in the
+            # failure message, then fail. If the JSON itself is malformed
+            # that's a separate, more serious regression — also fail.
+            $diagText = Get-Content $diagJson -Raw
+            try {
+              $diag = $diagText | ConvertFrom-Json -ErrorAction Stop
+            } catch {
+              throw "ccw diagnostics exited $diagExit AND emitted malformed JSON (parse error: $($_.Exception.Message)). This is a CLI-level regression — DiagnosticsCommand.Run() must always emit a well-formed envelope per Opus Phase 8 IMP5. Raw output above."
+            }
+            $missing = @($diag.dependencies | Where-Object { -not $_.present -or -not $_.meetsMinimumVersion })
+            $brokenTools = @($diag.tools | Where-Object { -not $_.ok })
+            $msg = "ccw diagnostics exit $diagExit on hosted runner."
+            if ($missing.Count -gt 0)     { $msg += " Missing/outdated deps: " + (($missing | ForEach-Object { $_.name }) -join ', ') + "." }
+            if ($brokenTools.Count -gt 0) { $msg += " Broken tools: " + (($brokenTools | ForEach-Object { $_.name }) -join ', ') + "." }
+            if ($diag.error)              { $msg += " Probe-layer error: $($diag.error.type) -- $($diag.error.message)." }
+            "DIAG_REPORT=$diagJson" >> $env:GITHUB_ENV
+            throw $msg
+          } else {
+            "DIAG_REPORT=$diagJson" >> $env:GITHUB_ENV
+            # Verify the JSON parses + has schemaVersion="1" (catches
+            # accidental schema drift / corrupt output even when exit 0).
+            $diag = Get-Content $diagJson -Raw | ConvertFrom-Json
+            if ($diag.schemaVersion -ne '1') {
+              throw "ccw diagnostics emitted unexpected schemaVersion '$($diag.schemaVersion)' (expected '1')"
+            }
+            if (-not $diag.cli.version) { throw 'diagnostics report missing cli.version' }
+            Write-Host "OK: ccw diagnostics schemaVersion=1, cli.version=$($diag.cli.version)"
+          }
+
+      - name: Upload unsigned MSIX (PR diagnostics)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ccw-msix-x64-unsigned-pr
+          path: winui3/packaging/msix/dist/x64/*.msix
+          if-no-files-found: warn
+
+      - name: Upload portable CLI ZIP (PR diagnostics)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ccw-cli-x64-portable-pr
+          path: winui3/packaging/portable/dist/*.zip
+          if-no-files-found: warn
+
+      - name: Upload diagnostics report
+        if: always() && env.DIAG_REPORT != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ccw-diagnostics-report-pr
+          path: ${{ env.DIAG_REPORT }}
+          if-no-files-found: warn
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ccw-test-results
+          path: winui3/**/TestResults/*.trx
+          if-no-files-found: warn
+
+  ui-smoke:
+    name: UI smoke (signed MSIX install + ProcessAlive)
+    needs: build
+    runs-on: windows-2022
+    # Bound total runtime so a hung Add-AppxPackage or process launch
+    # can't consume the default 6h job timeout. Generous ceiling.
+    timeout-minutes: 25
+
+    defaults:
+      run:
+        working-directory: winui3
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download unsigned MSIX from build job
+        uses: actions/download-artifact@v4
+        with:
+          name: ccw-msix-x64-unsigned-pr
+          path: winui3/packaging/msix/dist/x64/
+
+      - name: Self-sign MSIX + trust dev cert
+        shell: pwsh
+        run: |
+          # GitHub-hosted windows-2022 runners run elevated, so the
+          # LocalMachine\TrustedPeople cert store is writable.
+          $ErrorActionPreference = 'Stop'
+          $unsigned = Get-ChildItem ./packaging/msix/dist/x64/*.msix |
+                        Where-Object Name -notlike '*signed*' |
+                        Select-Object -First 1
+          if (-not $unsigned) { throw 'No unsigned MSIX found in dist/x64/.' }
+          $signedDir = Join-Path (Split-Path $unsigned.FullName -Parent) 'signed'
+          New-Item -ItemType Directory -Force -Path $signedDir | Out-Null
+          $signedPath = Join-Path $signedDir $unsigned.Name
+          pwsh ./packaging/msix/sign-msix.ps1 `
+                -MsixPath $unsigned.FullName `
+                -OutputPath $signedPath `
+                -Mode SelfSigned `
+                -TrustDevCert
+          if ($LASTEXITCODE -ne 0) { throw "sign-msix.ps1 failed (exit $LASTEXITCODE)" }
+          if (-not (Test-Path $signedPath)) { throw "Signed MSIX missing at $signedPath" }
+          "SIGNED_MSIX=$signedPath" >> $env:GITHUB_ENV
+
+      - name: Install signed MSIX (with retry for transient failures)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $signed = $env:SIGNED_MSIX
+          if (-not $signed) { throw 'SIGNED_MSIX env not set by signing step.' }
+          # Retry only on known-transient HRESULTs; fail fast on
+          # structural / signing / policy issues.
+          $transientHRs = @('0x80073D02', '0x80070020', '0x80073CFB', '0x80073D06', '0x80073CF9')
+          $maxAttempts = 3
+          for ($i = 1; $i -le $maxAttempts; $i++) {
+            try {
+              Write-Host "Add-AppxPackage attempt $i/$maxAttempts..." -ForegroundColor Cyan
+              Add-AppxPackage -Path $signed -ForceApplicationShutdown -ErrorAction Stop
+              Write-Host "Install OK on attempt $i." -ForegroundColor Green
+              break
+            } catch {
+              $msg = $_.Exception.Message
+              $isTransient = $false
+              foreach ($hr in $transientHRs) {
+                if ($msg -match [regex]::Escape($hr)) { $isTransient = $true; break }
+              }
+              if ($i -eq $maxAttempts) {
+                Write-Host "Final attempt failed: $msg" -ForegroundColor Red
+                try {
+                  Get-AppPackageLog -ErrorAction SilentlyContinue |
+                    Select-Object -First 30 |
+                    Format-Table -AutoSize | Out-String | Write-Host
+                } catch { }
+                throw
+              }
+              if (-not $isTransient) {
+                Write-Host "Non-transient HRESULT in error: $msg - failing fast." -ForegroundColor Red
+                throw
+              }
+              if ($msg -match '0x80073CFB' -or $msg -match '0x80073D06') {
+                Write-Host "Conflicting install detected; removing existing CopilotConnectorWorkflow.WinUI package before retry." -ForegroundColor Yellow
+                try {
+                  Get-AppxPackage -Name CopilotConnectorWorkflow.WinUI |
+                    Remove-AppxPackage -ErrorAction SilentlyContinue
+                } catch { }
+              }
+              Write-Host "Transient install failure (will retry): $msg" -ForegroundColor Yellow
+              Start-Sleep -Seconds 10
+            }
+          }
+          $pkg = Get-AppxPackage -Name CopilotConnectorWorkflow.WinUI | Select-Object -First 1
+          if (-not $pkg) { throw 'CopilotConnectorWorkflow.WinUI package not registered after install.' }
+          $aumid = "$($pkg.PackageFamilyName)!App"
+          $exe = Join-Path $pkg.InstallLocation 'CcwUI.exe'
+          if (-not (Test-Path $exe)) { throw "CcwUI.exe missing at $exe" }
+          Write-Host "Package family: $($pkg.PackageFamilyName)"
+          Write-Host "AUMID:          $aumid"
+          Write-Host "Install path:   $($pkg.InstallLocation)"
+          "AUMID=$aumid"            >> $env:GITHUB_ENV
+          "INSTALLED_EXE=$exe"      >> $env:GITHUB_ENV
+          "INSTALL_LOCATION=$($pkg.InstallLocation)" >> $env:GITHUB_ENV
+
+      - name: GUI launch + ProcessAlive smoke
+        shell: pwsh
+        run: |
+          # Plan §4 Phase 8 - WinAppDriver window-title smoke is deferred
+          # to a follow-up enhancement (UI Automation flake-rate on hosted
+          # runners is non-trivial). For PR gate we just need to prove
+          # the installed MSIX boots without crashing on launch via the
+          # actual packaged-app activation path (XAML markup errors,
+          # App.OnLaunched exceptions, missing dependent native DLLs,
+          # broken AUMID / manifest Application Id, etc.).
+          #
+          # GPT Phase 9 IMPORTANT 3: launch via shell:AppsFolder\$AUMID
+          # rather than the raw exe so we exercise the same packaged
+          # activation path Start menu / Run uses. The raw exe launch
+          # would mask AUMID, EntryPoint, and packaged-activation
+          # regressions — exactly the surface the v1 release depends on.
+          $ErrorActionPreference = 'Stop'
+          $aumid = $env:AUMID
+          $exe   = $env:INSTALLED_EXE
+          $installLocation = $env:INSTALL_LOCATION
+          if (-not $aumid) { throw 'AUMID env not set by install step.' }
+          if (-not $exe)   { throw 'INSTALLED_EXE env not set by install step.' }
+          if (-not $installLocation) { throw 'INSTALL_LOCATION env not set by install step.' }
+          Write-Host "Launching shell:AppsFolder\$aumid (packaged activation)..." -ForegroundColor Cyan
+          # explorer.exe handles shell: URIs; -PassThru returns the
+          # explorer.exe process (not CcwUI.exe). We then poll for the
+          # real CcwUI.exe under the install location.
+          Start-Process -FilePath 'explorer.exe' -ArgumentList "shell:AppsFolder\$aumid" | Out-Null
+          $discoverDeadline = (Get-Date).AddSeconds(30)
+          $proc = $null
+          while ((Get-Date) -lt $discoverDeadline -and -not $proc) {
+            Start-Sleep -Seconds 1
+            $candidates = Get-Process -Name 'CcwUI' -ErrorAction SilentlyContinue
+            foreach ($c in $candidates) {
+              try {
+                if ($c.Path -and $c.Path.StartsWith($installLocation, [System.StringComparison]::OrdinalIgnoreCase)) {
+                  $proc = $c
+                  break
+                }
+              } catch { } # access-denied on Path is non-fatal
+            }
+          }
+          if (-not $proc) {
+            throw "CcwUI.exe under install location '$installLocation' did not appear within 30s of shell:AppsFolder activation. Packaged activation (AUMID=$aumid, EntryPoint, manifest Application Id) is broken."
+          }
+          Write-Host "Found CcwUI.exe PID=$($proc.Id) at $($proc.Path)" -ForegroundColor Green
+          $aliveSeconds = 15
+          $deadline = (Get-Date).AddSeconds($aliveSeconds)
+          $crashedEarly = $false
+          while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds 1
+            $proc.Refresh()
+            if ($proc.HasExited) {
+              $crashedEarly = $true
+              break
+            }
+          }
+          if ($crashedEarly) {
+            throw "CcwUI.exe exited early (exit code $($proc.ExitCode)) within the $aliveSeconds-second alive window. Check Application event log."
+          }
+          Write-Host "OK: CcwUI.exe stayed alive for $aliveSeconds seconds (PID $($proc.Id))." -ForegroundColor Green
+          # Tear down cleanly so the runner doesn't hold the install lock.
+          try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch { }
+
+      - name: Uninstall MSIX (cleanup)
+        if: always()
+        shell: pwsh
+        run: |
+          try {
+            Get-AppxPackage -Name CopilotConnectorWorkflow.WinUI -ErrorAction SilentlyContinue |
+              Remove-AppxPackage -ErrorAction SilentlyContinue
+          } catch { }

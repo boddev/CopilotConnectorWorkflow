@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="Ccw.UI.Views.MainShell"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:Microsoft.UI.Xaml.Controls">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+        <InfoBar x:Name="DepsBanner" Grid.Row="0"
+                 Severity="Warning"
+                 IsClosable="True"
+                 IsOpen="False"
+                 Title="Some dependencies are missing or out of date"
+                 Message="The CCW pipeline needs Node, Git, Azure CLI and the GitHub Copilot CLI. Open the first-run setup to install or skip.">
+            <InfoBar.ActionButton>
+                <Button Content="Open setup" Click="OpenWizard_Click"/>
+            </InfoBar.ActionButton>
+        </InfoBar>
+        <NavigationView
+            x:Name="Nav"
+            Grid.Row="1"
+            PaneDisplayMode="Left"
+            IsBackButtonVisible="Collapsed"
+            IsSettingsVisible="False"
+            SelectionChanged="Nav_SelectionChanged">
+            <NavigationView.MenuItems>
+                <NavigationViewItem Content="Jobs" Tag="jobs">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE8FD;"/>
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Content="New job" Tag="new">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE710;"/>
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Content="Compare" Tag="compare">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE8AB;"/>
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItemSeparator/>
+                <NavigationViewItem Content="Setup" Tag="wizard">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE713;"/>
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Content="Diagnostics" Tag="diag">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE9F5;"/>
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+            </NavigationView.MenuItems>
+            <Frame x:Name="ContentFrame"/>
+        </NavigationView>
+    </Grid>
+</Page>

@@ -1,0 +1,7 @@
+{
+  "Endpoint": "https://eus.codesigning.azure.net/",
+  "CodeSigningAccountName": "REPLACE-WITH-YOUR-TRUSTED-SIGNING-ACCOUNT-NAME",
+  "CertificateProfileName": "REPLACE-WITH-YOUR-CERTIFICATE-PROFILE-NAME",
+  "CorrelationId": "ccw-msix-release",
+  "ExcludeCredentials": []
+}

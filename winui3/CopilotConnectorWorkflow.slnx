@@ -1,19 +1,11 @@
 <Solution>
-  <!--
-    Phase 0 scaffold — non-UI projects only. The WinUI 3 head (`Ccw.UI`)
-    is added to this solution in Phase 5 because (a) it depends on every
-    other src project, and (b) the WinUI scaffold (App.xaml.cs,
-    Package.appxmanifest, app.manifest, AppInstance plumbing) is itself a
-    Phase 5 deliverable. Until then, `dotnet build` against this solution
-    exercises the library + CLI + test surface without dragging in the
-    Windows-specific TFM.
-  -->
   <Folder Name="/src/">
     <Project Path="src/Ccw.Core/Ccw.Core.csproj" />
     <Project Path="src/Ccw.Steps/Ccw.Steps.csproj" />
     <Project Path="src/Ccw.Templates/Ccw.Templates.csproj" />
     <Project Path="src/Ccw.Bootstrap/Ccw.Bootstrap.csproj" />
     <Project Path="src/Ccw.Cli/Ccw.Cli.csproj" />
+    <Project Path="src/Ccw.UI/Ccw.UI.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Ccw.Core.Tests/Ccw.Core.Tests.csproj" />
@@ -21,5 +13,7 @@
     <Project Path="tests/Ccw.Cli.Tests/Ccw.Cli.Tests.csproj" />
     <Project Path="tests/Ccw.Templates.Tests/Ccw.Templates.Tests.csproj" />
     <Project Path="tests/Ccw.Parity.Tests/Ccw.Parity.Tests.csproj" />
+    <Project Path="tests/Ccw.Bootstrap.Tests/Ccw.Bootstrap.Tests.csproj" />
   </Folder>
 </Solution>
+
