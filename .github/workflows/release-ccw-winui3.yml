@@ -82,7 +82,7 @@ jobs:
 
       - name: Build portable CLI ZIP (${{ matrix.arch }})
         shell: pwsh
-        run: pwsh ./packaging/portable/build-cli-zip.ps1 -Arch ${{ matrix.arch }}
+        run: pwsh ./packaging/portable/build-cli-zip.ps1 -Rid win-${{ matrix.arch }}
 
       - name: Verify unsigned MSIX structure
         shell: pwsh
@@ -106,13 +106,20 @@ jobs:
           if ($mf.Package.Identity.ProcessorArchitecture -ne $arch) {
             throw "Expected ProcessorArchitecture=$arch, got '$($mf.Package.Identity.ProcessorArchitecture)'"
           }
+          # Opus Phase 9 IMPORTANT 8: assert Identity.Name matches the
+          # canonical package id. The PR gate has this; the release one
+          # didn't, and the release artefact is the one users install.
+          $expectedId = 'CopilotConnectorWorkflow.WinUI'
+          if ($mf.Package.Identity.Name -ne $expectedId) {
+            throw "Expected AppxManifest Identity.Name='$expectedId', got '$($mf.Package.Identity.Name)'. A drifted package id would break in-place upgrade for existing installs."
+          }
           if (-not (Test-Path (Join-Path $tmp.FullName 'CcwUI.exe'))) {
             throw 'CcwUI.exe missing at MSIX root'
           }
           if (-not (Test-Path (Join-Path $tmp.FullName 'templates'))) {
             throw 'templates\ subdir missing at MSIX root'
           }
-          Write-Host "OK: unsigned MSIX is structurally valid (arch=$arch, CcwUI.exe + templates\ present)"
+          Write-Host "OK: unsigned MSIX is structurally valid (arch=$arch, Identity.Name=$expectedId, CcwUI.exe + templates\ present)"
 
       - name: Upload unsigned MSIX
         uses: actions/upload-artifact@v4
@@ -280,11 +287,22 @@ jobs:
                         Sort-Object LastWriteTime -Descending |
                         Select-Object -First 1
           if (-not $signtool) { throw "signtool.exe not found under $sdkBin" }
-          $dlibCandidates = @(
-            (Join-Path $env:USERPROFILE '.nuget/packages/microsoft.artifactsigning.client/bin/x64/Azure.CodeSigning.Dlib.dll')
-          )
-          $dlib = $dlibCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if (-not $dlib) { throw "Trusted Signing dlib not found at expected locations: $($dlibCandidates -join ', ')" }
+          # Opus Phase 9 IMPORTANT 2: resolve the Trusted Signing dlib
+          # via recursive discovery — the same convention sign-msix.ps1
+          # uses for MSIX signing. The dll's exact subpath inside the
+          # NuGet package has historically been `bin/x64/` but a future
+          # client-tools rev could change it; hardcoding one candidate
+          # would silently break the ZIP leg while the MSIX leg keeps
+          # working.
+          $nugetRoot = Join-Path $env:USERPROFILE '.nuget/packages'
+          $dlib = Get-ChildItem -Path $nugetRoot -Filter 'Azure.CodeSigning.Dlib.dll' -Recurse -ErrorAction SilentlyContinue |
+                    Where-Object FullName -like '*\x64\*' |
+                    Select-Object -First 1
+          if (-not $dlib) {
+            throw "Trusted Signing dlib (Azure.CodeSigning.Dlib.dll, x64) not found under $nugetRoot. Did the 'Install Microsoft.ArtifactSigning.Client' step succeed? ARTIFACT_SIGNING_VERSION=$($env:ARTIFACT_SIGNING_VERSION)"
+          }
+          $dlib = $dlib.FullName
+          Write-Host "Resolved Trusted Signing dlib: $dlib"
           $metaPath = Resolve-Path ./packaging/msix/azure-signing/metadata.json
 
           & $signtool.FullName sign `
@@ -298,6 +316,24 @@ jobs:
               $ccwExe.FullName
           if ($LASTEXITCODE -ne 0) { throw "signtool sign of ccw.exe failed (exit $LASTEXITCODE)" }
 
+          # GPT Phase 9 IMPORTANT 5: verify the just-signed exe before
+          # repacking. Catches: timestamp-server outage where the sign
+          # call "succeeded" without a counter-sig, wrong file path
+          # selected for signing, and Authenticode chain breakage.
+          $sig = Get-AuthenticodeSignature -FilePath $ccwExe.FullName
+          if ($sig.Status -ne 'Valid') {
+            throw "Post-sign verification FAILED for $($ccwExe.FullName): status=$($sig.Status), message=$($sig.StatusMessage). Refusing to repack an unsigned/invalidly-signed ccw.exe into the release ZIP."
+          }
+          if (-not $sig.TimeStamperCertificate) {
+            throw "Post-sign verification: ccw.exe has no timestamp counter-signature. The Authenticode signature will expire when the signing cert does. Refusing to publish."
+          }
+          $signerSubject = $sig.SignerCertificate.Subject
+          $expected = $env:TS_PUBLISHER
+          if ($expected -and $signerSubject -notlike "*$expected*") {
+            throw "Post-sign verification: signer subject '$signerSubject' does not contain expected publisher '$expected' (TRUSTED_SIGNING_PUBLISHER var). Wrong cert profile?"
+          }
+          Write-Host "OK: ccw.exe signed by '$signerSubject', timestamp=$($sig.TimeStamperCertificate.Subject)" -ForegroundColor Green
+
           # Repack the ZIP with the signed exe replacing the unsigned one.
           $signedZipDir = Join-Path (Split-Path $zip.FullName -Parent) 'signed'
           New-Item -ItemType Directory -Force -Path $signedZipDir | Out-Null
@@ -305,7 +341,21 @@ jobs:
           if (Test-Path $signedZipPath) { Remove-Item $signedZipPath -Force }
           Compress-Archive -Path (Join-Path $extracted '*') -DestinationPath $signedZipPath -CompressionLevel Optimal
           if (-not (Test-Path $signedZipPath)) { throw "Failed to repack signed portable ZIP at $signedZipPath" }
-          Write-Host "OK: portable ZIP repacked with signed ccw.exe at $signedZipPath"
+
+          # Final post-repack verification: re-extract the signed ZIP and
+          # confirm the inner ccw.exe is still validly signed (catches
+          # corruption during recompression or wrong-path inclusion).
+          $verifyDir = Join-Path $env:RUNNER_TEMP "verify-portable-$([guid]::NewGuid())"
+          New-Item -ItemType Directory -Force -Path $verifyDir | Out-Null
+          Expand-Archive -Path $signedZipPath -DestinationPath $verifyDir -Force
+          $innerExe = Get-ChildItem -Path $verifyDir -Filter 'ccw.exe' -Recurse | Select-Object -First 1
+          if (-not $innerExe) { throw "After repack, ccw.exe missing from signed ZIP $signedZipPath" }
+          $innerSig = Get-AuthenticodeSignature -FilePath $innerExe.FullName
+          if ($innerSig.Status -ne 'Valid') {
+            throw "Post-repack verification: inner ccw.exe in $signedZipPath has signature status '$($innerSig.Status)'. Refusing to publish."
+          }
+          Remove-Item -Recurse -Force $verifyDir
+          Write-Host "OK: portable ZIP repacked with signed ccw.exe at $signedZipPath (post-repack signature verified)" -ForegroundColor Green
 
       - name: Upload signed MSIX
         uses: actions/upload-artifact@v4
@@ -313,6 +363,7 @@ jobs:
           name: ccw-msix-${{ matrix.arch }}-signed
           path: winui3/packaging/msix/dist/${{ matrix.arch }}/signed/*.msix
           if-no-files-found: error
+          retention-days: 7
 
       - name: Upload signed portable CLI ZIP
         uses: actions/upload-artifact@v4
@@ -320,6 +371,7 @@ jobs:
           name: ccw-cli-${{ matrix.arch }}-portable-signed
           path: winui3/packaging/portable/dist/signed/*.zip
           if-no-files-found: error
+          retention-days: 7
 
   # ----------------------------------------------------------------------
   # Job 3: Publish GitHub release with signed MSIXes + signed portable
@@ -378,6 +430,25 @@ jobs:
           if ($portables.Count -lt 2) { throw "Expected at least 2 portable ZIPs (x64 + arm64), found $($portables.Count): $($portables -join ', ')" }
           if ($dscs.Count -lt 1)      { throw "Expected at least 1 DSC YAML, found $($dscs.Count)" }
           $all = @() + $msixes + $portables + $dscs
+
+          # GPT Phase 9 IMPORTANT 4: emit a SHA256SUMS.txt over the
+          # FINAL signed artefacts and attach it to the release. The
+          # in-script hashes captured by build-msix.ps1 / build-cli-zip
+          # .ps1 are stale here because Trusted Signing rewrote the
+          # MSIX, and ZIP repacking changed its bytes too. A consumer
+          # who downloads $tag's .msix / .zip from the release page
+          # has no other way to verify integrity post-download.
+          $sumsPath = Join-Path $env:RUNNER_TEMP 'SHA256SUMS.txt'
+          $sumLines = foreach ($f in $all | Sort-Object) {
+            $h = (Get-FileHash -Algorithm SHA256 -Path $f).Hash.ToLowerInvariant()
+            $name = Split-Path $f -Leaf
+            "$h  $name"
+          }
+          Set-Content -Path $sumsPath -Value $sumLines -Encoding ascii
+          Write-Host "SHA256SUMS.txt:" -ForegroundColor Cyan
+          $sumLines | ForEach-Object { Write-Host "  $_" }
+          $all += $sumsPath
+
           # Fail-closed against ANY gh failure, not just "release exists".
           # gh release view exits non-zero for "not found" AND for
           # transient errors (auth, 5xx, rate limit). Only treat exit 0

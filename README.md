@@ -4,6 +4,8 @@ An end-to-end orchestrator that turns a tabular or document dataset into a deplo
 
 Each run is a self-contained "job" under `workspace/jobs/<jobId>/`. Steps are individually re-runnable with content-hash-based cache invalidation. Use the GUI for interactive monitoring or the CLI for headless, scriptable runs.
 
+> **Windows-native version available.** A WinUI 3 + .NET 10 port of this app ships as an MSIX installer (no separate Node runtime required to launch). See [`winui3/docs/README.md`](winui3/docs/README.md) for install/usage and [`winui3/docs/developer-guide.md`](winui3/docs/developer-guide.md) for the porting plan + architecture. The two surfaces share the on-disk job format ([`winui3/docs/file-formats.md`](winui3/docs/file-formats.md)) and can coexist on the same machine: the Node app uses the repo-relative `workspace/` directory, the WinUI app uses `%LOCALAPPDATA%\CopilotConnectorWorkflow\workspace\`.
+
 ```
                                   ┌─────────────────────────┐
 dataset ─► eval set ─► enhanced ─►│ hardened    + connector │─► Azure deploy   ─► (optional) M365 Copilot

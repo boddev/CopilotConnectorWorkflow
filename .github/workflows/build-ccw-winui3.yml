@@ -13,11 +13,13 @@ on:
       - 'winui3/**'
       - 'templates/**'
       - '.github/workflows/build-ccw-winui3.yml'
+      - '.github/workflows/release-ccw-winui3.yml'
   pull_request:
     paths:
       - 'winui3/**'
       - 'templates/**'
       - '.github/workflows/build-ccw-winui3.yml'
+      - '.github/workflows/release-ccw-winui3.yml'
 
 # Cancel superseded PR runs; release runs in release-ccw-winui3.yml
 # always carry through (cancel-in-progress: false there).
@@ -106,7 +108,7 @@ jobs:
 
       - name: Build portable CLI ZIP (x64 smoke)
         shell: pwsh
-        run: pwsh ./packaging/portable/build-cli-zip.ps1 -Arch x64
+        run: pwsh ./packaging/portable/build-cli-zip.ps1 -Rid win-x64
 
       - name: Headless ccw diagnostics smoke (from portable ZIP)
         shell: pwsh
@@ -137,8 +139,32 @@ jobs:
           Write-Host "ccw diagnostics exit code: $diagExit"
           Get-Content $diagJson -Raw | Write-Host
           if ($diagExit -ne 0) {
-            Write-Host "ccw diagnostics returned non-zero; treating as soft-fail on PR (one or more deps missing on runner) but uploading report for triage."
+            # GPT Phase 9 IMPORTANT 2: previously this was soft-fail with
+            # the rationale "deps may be missing on the runner." But
+            # windows-2022 hosted images ship node, git, gh (+ Azure CLI
+            # via WinGet). If `ccw diagnostics` returns non-zero here it's
+            # either (a) a real probe regression, (b) the runner image
+            # changed and we need to update the workflow, or (c) the CLI
+            # itself crashed. In every case the gate must surface it so
+            # we don't merge a probe-layer regression silently.
+            #
+            # Parse the JSON first to give a useful diagnostic in the
+            # failure message, then fail. If the JSON itself is malformed
+            # that's a separate, more serious regression — also fail.
+            $diagText = Get-Content $diagJson -Raw
+            try {
+              $diag = $diagText | ConvertFrom-Json -ErrorAction Stop
+            } catch {
+              throw "ccw diagnostics exited $diagExit AND emitted malformed JSON (parse error: $($_.Exception.Message)). This is a CLI-level regression — DiagnosticsCommand.Run() must always emit a well-formed envelope per Opus Phase 8 IMP5. Raw output above."
+            }
+            $missing = @($diag.dependencies | Where-Object { -not $_.present -or -not $_.meetsMinimumVersion })
+            $brokenTools = @($diag.tools | Where-Object { -not $_.ok })
+            $msg = "ccw diagnostics exit $diagExit on hosted runner."
+            if ($missing.Count -gt 0)     { $msg += " Missing/outdated deps: " + (($missing | ForEach-Object { $_.name }) -join ', ') + "." }
+            if ($brokenTools.Count -gt 0) { $msg += " Broken tools: " + (($brokenTools | ForEach-Object { $_.name }) -join ', ') + "." }
+            if ($diag.error)              { $msg += " Probe-layer error: $($diag.error.type) -- $($diag.error.message)." }
             "DIAG_REPORT=$diagJson" >> $env:GITHUB_ENV
+            throw $msg
           } else {
             "DIAG_REPORT=$diagJson" >> $env:GITHUB_ENV
             # Verify the JSON parses + has schemaVersion="1" (catches
@@ -290,16 +316,46 @@ jobs:
           # Plan §4 Phase 8 - WinAppDriver window-title smoke is deferred
           # to a follow-up enhancement (UI Automation flake-rate on hosted
           # runners is non-trivial). For PR gate we just need to prove
-          # the installed MSIX boots without crashing on launch (XAML
-          # markup errors, App.OnLaunched exceptions, missing dependent
-          # native DLLs, etc.). 15s alive-window is plenty for a WinUI 3
-          # cold start on a hosted runner.
+          # the installed MSIX boots without crashing on launch via the
+          # actual packaged-app activation path (XAML markup errors,
+          # App.OnLaunched exceptions, missing dependent native DLLs,
+          # broken AUMID / manifest Application Id, etc.).
+          #
+          # GPT Phase 9 IMPORTANT 3: launch via shell:AppsFolder\$AUMID
+          # rather than the raw exe so we exercise the same packaged
+          # activation path Start menu / Run uses. The raw exe launch
+          # would mask AUMID, EntryPoint, and packaged-activation
+          # regressions — exactly the surface the v1 release depends on.
           $ErrorActionPreference = 'Stop'
-          $exe = $env:INSTALLED_EXE
-          if (-not $exe) { throw 'INSTALLED_EXE env not set by install step.' }
-          Write-Host "Launching $exe (no args, expect window to come up)..." -ForegroundColor Cyan
-          $proc = Start-Process -FilePath $exe -PassThru
-          if (-not $proc) { throw 'Start-Process returned null - CcwUI.exe failed to launch.' }
+          $aumid = $env:AUMID
+          $exe   = $env:INSTALLED_EXE
+          $installLocation = $env:INSTALL_LOCATION
+          if (-not $aumid) { throw 'AUMID env not set by install step.' }
+          if (-not $exe)   { throw 'INSTALLED_EXE env not set by install step.' }
+          if (-not $installLocation) { throw 'INSTALL_LOCATION env not set by install step.' }
+          Write-Host "Launching shell:AppsFolder\$aumid (packaged activation)..." -ForegroundColor Cyan
+          # explorer.exe handles shell: URIs; -PassThru returns the
+          # explorer.exe process (not CcwUI.exe). We then poll for the
+          # real CcwUI.exe under the install location.
+          Start-Process -FilePath 'explorer.exe' -ArgumentList "shell:AppsFolder\$aumid" | Out-Null
+          $discoverDeadline = (Get-Date).AddSeconds(30)
+          $proc = $null
+          while ((Get-Date) -lt $discoverDeadline -and -not $proc) {
+            Start-Sleep -Seconds 1
+            $candidates = Get-Process -Name 'CcwUI' -ErrorAction SilentlyContinue
+            foreach ($c in $candidates) {
+              try {
+                if ($c.Path -and $c.Path.StartsWith($installLocation, [System.StringComparison]::OrdinalIgnoreCase)) {
+                  $proc = $c
+                  break
+                }
+              } catch { } # access-denied on Path is non-fatal
+            }
+          }
+          if (-not $proc) {
+            throw "CcwUI.exe under install location '$installLocation' did not appear within 30s of shell:AppsFolder activation. Packaged activation (AUMID=$aumid, EntryPoint, manifest Application Id) is broken."
+          }
+          Write-Host "Found CcwUI.exe PID=$($proc.Id) at $($proc.Path)" -ForegroundColor Green
           $aliveSeconds = 15
           $deadline = (Get-Date).AddSeconds($aliveSeconds)
           $crashedEarly = $false
