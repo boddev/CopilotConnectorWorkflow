@@ -102,7 +102,14 @@ if (-not $isAdmin) {
     Start-Process -FilePath $pwshExe `
                   -ArgumentList $argList `
                   -Verb RunAs `
-                  -Wait
+                  -Wait `
+                  -PassThru |
+        ForEach-Object {
+            # Opus Phase 7 review IMPORTANT 4: propagate the elevated child's
+            # exit code so callers (CI, wrappers) see install failures
+            # instead of a silent exit 0 from the un-elevated parent.
+            exit $_.ExitCode
+        }
     return
 }
 

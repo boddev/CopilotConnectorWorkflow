@@ -123,7 +123,13 @@ if (Test-Path $templatesSrc) {
     Copy-Item -Path $templatesSrc -Destination $stagingPayload -Recurse -Force
     Write-Host "    templates\ subdir copied"
 } else {
-    Write-Warning "templates\ subdir not present under publish output; CCW will not find runtime templates."
+    # GPT Phase 7 review IMPORTANT 4: fail closed. A portable ZIP without
+    # templates\ is broken at runtime - ccw.exe needs them under
+    # AppContext.BaseDirectory\templates to render the connector project
+    # or any deploy script. If the transitive Content copy ever stops
+    # working (e.g. Ccw.Cli loses its transitive dep on Ccw.Templates),
+    # we want the release to fail loudly here, not ship a dead ZIP.
+    throw "Phase 7 packaging: templates\ subdir not present under publish output at '$templatesSrc'. The portable CLI cannot operate without runtime templates. Verify Ccw.Cli (or one of its ProjectReferences) transitively references Ccw.Templates, and that Ccw.Templates.csproj's Content include for ..\..\..\templates\**\* has CopyToPublishDirectory=PreserveNewest."
 }
 
 $readmePath = Join-Path $stagingPayload 'README.txt'

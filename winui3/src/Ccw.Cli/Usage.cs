@@ -18,6 +18,7 @@ Commands:
   list        List all jobs
   tools       Show detected tool paths and health
   auth        Validate Graph app credentials and seed WorkIQ/EvalScore auth
+  diagnostics Emit a JSON inventory report (deps + cli info); --diagnostics alias
   help        Show this message
 
 See the CCW user guide for the full flag matrix. Step log stream output

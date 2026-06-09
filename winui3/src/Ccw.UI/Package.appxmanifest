@@ -29,7 +29,7 @@
   </Resources>
 
   <Applications>
-    <Application Id="App" Executable="$targetnametoken$.exe" EntryPoint="Ccw.UI.App">
+    <Application Id="App" Executable="$targetnametoken$.exe" EntryPoint="$targetentrypoint$">
       <uap:VisualElements
         DisplayName="Copilot Connector Workflow"
         Description="Generate, deploy, and score Microsoft 365 Copilot Connectors."

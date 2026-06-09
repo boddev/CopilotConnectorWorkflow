@@ -125,4 +125,18 @@
           SkipUnchangedFiles="true" />
   </Target>
 
+  <!--
+    Opus Phase 7 review IMPORTANT 1: the workaround above is gated on
+    MsixTaskAssemblyLocation being non-empty. If a future Windows App
+    SDK upgrade renames that property or sets it later in the build, the
+    target silently no-ops and the MSB4018 FileNotFoundException
+    reappears at MSIX build time. Fail loudly instead.
+  -->
+  <Target Name="_CcwGuardMsixTaskAssemblyLocation"
+          BeforeTargets="_ValidatePresenceOfAppxManifestItems"
+          Condition="'$(WindowsPackageType)'=='MSIX' And '$(MSBuildRuntimeType)'=='Core'">
+    <Error Text="Phase 7 MSIX prerequisite missing: MsixTaskAssemblyLocation is not set, so _CcwEnsureMsixTaskSysPerm cannot copy System.Security.Permissions next to the WinAppSdkValidateAppxManifestItems task DLL. The Windows App SDK MSBuild integration may have changed the property name or its evaluation order. Investigate $(MSBuildProjectFullPath) under 'msbuild /pp' and update _CcwEnsureMsixTaskSysPerm + _CcwGuardMsixTaskAssemblyLocation accordingly."
+           Condition="'$(MsixTaskAssemblyLocation)'==''" />
+  </Target>
+
 </Project>

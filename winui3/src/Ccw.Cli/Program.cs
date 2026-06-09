@@ -38,6 +38,9 @@ internal static class Program
                 return 0;
             case "tools":
                 return ToolsCommand.Run();
+            case "diagnostics":
+            case "--diagnostics":
+                return DiagnosticsCommand.Run(parsed);
             case "auth":
                 return await AuthCommand.RunAsync(parsed, ct).ConfigureAwait(false);
             case "list":

@@ -218,8 +218,13 @@ function Get-DevCertificate {
     try {
         $pwd = ConvertTo-SecureString $raw -ErrorAction Stop
     } catch {
-        Write-Host "  Dev cert password is in legacy plain-text format; consider regenerating with -Force to migrate to DPAPI." -ForegroundColor DarkYellow
-        $pwd = ConvertTo-SecureString $raw -AsPlainText -Force
+        # Opus Phase 7 review IMPORTANT 5: NO silent plaintext fallback.
+        # An attacker who can write to the password file (the ACL is only
+        # set once at creation; later loosening would silently re-enable
+        # this path) could substitute their own PFX + plaintext password
+        # and the signer cert would change silently. Hard-fail with
+        # actionable guidance.
+        throw "Phase 7 signing: dev cert password at '$pwdPath' is not a valid DPAPI blob for the current user/machine, so it cannot be safely rehydrated. Re-run sign-msix.ps1 with -Force to regenerate the dev PFX (the new password will be DPAPI-bound to this user). Underlying error: $($_.Exception.Message)"
     }
     $pwdString = [System.Net.NetworkCredential]::new('', $pwd).Password
 

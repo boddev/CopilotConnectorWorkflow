@@ -133,9 +133,25 @@ public static class WinGetDriver
                 Error = "winget is not available on this machine. Install App Installer from the Microsoft Store, or use the manual install link.",
             };
         }
+        // GPT Phase 7 review IMPORTANT 2: launch winget via the resolved
+        // absolute path discovered in DetectAvailability, not by relying on
+        // PATH resolution at exec time. Under MSIX/full-trust the env
+        // block is snapshotted at launch and app-execution-alias behaviour
+        // can differ between probe and install, so re-resolving here keeps
+        // probe and install in lockstep.
+        var winGetPath = DependencyProbes.WhichOnPath("winget");
+        if (string.IsNullOrEmpty(winGetPath))
+        {
+            return new WinGetInstallResult
+            {
+                Success = false,
+                ExitCode = -1,
+                Error = "winget resolved during availability check but is no longer on PATH.",
+            };
+        }
         var psi = new ProcessStartInfo
         {
-            FileName = "winget",
+            FileName = winGetPath,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
