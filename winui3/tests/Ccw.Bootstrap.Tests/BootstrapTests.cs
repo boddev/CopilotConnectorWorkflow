@@ -9,6 +9,20 @@ using Xunit;
 
 namespace Ccw.Bootstrap.Tests;
 
+public sealed class DependencyProbeCommandLineTests
+{
+    [Fact]
+    public void SplitCommandLine_ParsesQuotedArguments()
+    {
+        var args = DependencyProbes.SplitCommandLine("\"C:\\Program Files\\GitHub CLI\\gh.exe\" extension list");
+
+        Assert.Equal(3, args.Length);
+        Assert.Equal("C:\\Program Files\\GitHub CLI\\gh.exe", args[0]);
+        Assert.Equal("extension", args[1]);
+        Assert.Equal("list", args[2]);
+    }
+}
+
 public sealed class SemverCompareTests
 {
     [Theory]

@@ -13,6 +13,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="Ccw.Cli" />
     <InternalsVisibleTo Include="Ccw.Parity.Tests" />
+    <InternalsVisibleTo Include="Ccw.Bootstrap.Tests" />
   </ItemGroup>
 
 </Project>

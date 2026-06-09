@@ -17,6 +17,7 @@ using Ccw.Core.Dataset;
 using Ccw.Core.Hashing;
 using Ccw.Core.Json;
 using Ccw.Core.Models;
+using Ccw.Core.Util;
 
 namespace Ccw.Core.Jobs;
 
@@ -181,24 +182,47 @@ public static class JobStore
     {
         var file = Path.Combine(JobDir(jobId), "job.json");
         if (!File.Exists(file)) return null;
-        var json = File.ReadAllText(file);
-        return JsonSerializer.Deserialize<JobRecord>(json, CcwJsonOptions.Pretty);
+        try
+        {
+            var json = File.ReadAllText(file);
+            return JsonSerializer.Deserialize<JobRecord>(json, CcwJsonOptions.Pretty);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Log($"Skipping unreadable job manifest: {file}", ex);
+            return null;
+        }
     }
 
     public static IReadOnlyList<JobRecord> ListJobs()
     {
-        var root = WorkspaceRoot();
-        if (!Directory.Exists(root)) return [];
-        var jobs = new List<JobRecord>();
-        foreach (var dir in Directory.GetDirectories(root))
+        try
         {
-            var id = Path.GetFileName(dir);
-            var job = LoadJob(id);
-            if (job is not null) jobs.Add(job);
+            var root = WorkspaceRoot();
+            if (!Directory.Exists(root)) return [];
+            var jobs = new List<JobRecord>();
+            foreach (var dir in Directory.GetDirectories(root))
+            {
+                try
+                {
+                    var id = Path.GetFileName(dir);
+                    var job = LoadJob(id);
+                    if (job is not null) jobs.Add(job);
+                }
+                catch (Exception ex)
+                {
+                    AppLogger.Log($"Skipping unreadable job directory: {dir}", ex);
+                }
+            }
+            // Reverse-chronological by createdAt (ISO-8601 strings sort lexically = chronologically when same precision).
+            jobs.Sort((a, b) => string.CompareOrdinal(b.CreatedAt, a.CreatedAt));
+            return jobs;
         }
-        // Reverse-chronological by createdAt (ISO-8601 strings sort lexically = chronologically when same precision).
-        jobs.Sort((a, b) => string.CompareOrdinal(b.CreatedAt, a.CreatedAt));
-        return jobs;
+        catch (Exception ex)
+        {
+            AppLogger.Log("Failed to enumerate jobs", ex);
+            return [];
+        }
     }
 
     private static readonly Regex s_connectorIdRe = new("^[a-zA-Z0-9]{3,128}$", RegexOptions.Compiled);

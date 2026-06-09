@@ -71,6 +71,32 @@ public sealed class JobStoreTests : IDisposable
     }
 
     [Fact]
+    public void LoadJob_CorruptJson_ReturnsNull()
+    {
+        var created = JobStore.CreateJob(MakeConfig());
+        var file = Path.Combine(created.Workspace, "job.json");
+        File.WriteAllText(file, "{ not valid json");
+
+        var loaded = JobStore.LoadJob(created.Id);
+
+        Assert.Null(loaded);
+    }
+
+    [Fact]
+    public void ListJobs_SkipsCorruptJobJson()
+    {
+        var created = JobStore.CreateJob(MakeConfig());
+        var brokenDir = Path.Combine(JobStore.WorkspaceRoot(), "broken-job");
+        Directory.CreateDirectory(brokenDir);
+        File.WriteAllText(Path.Combine(brokenDir, "job.json"), "{ not valid json");
+
+        var exception = Record.Exception(() => JobStore.ListJobs());
+
+        Assert.Null(exception);
+        Assert.Contains(JobStore.ListJobs(), job => job.Id == created.Id);
+    }
+
+    [Fact]
     public void ValidateConfig_MissingDataset_Throws()
     {
         var cfg = MakeConfig() with { Dataset = "" };
