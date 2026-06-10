@@ -28,6 +28,7 @@ public sealed partial class NewJobPage : Page
                 {
                     "azure-container-apps" => DeployTarget.AzureContainerApps,
                     "both" => DeployTarget.Both,
+                    "local" => DeployTarget.Local,
                     _ => DeployTarget.AzureFunctions,
                 },
                 Mode = RunMode.Build,

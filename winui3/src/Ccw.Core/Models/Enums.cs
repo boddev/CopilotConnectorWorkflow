@@ -58,6 +58,7 @@ public enum DeployTarget
     [JsonStringEnumMemberName("azure-functions")] AzureFunctions,
     [JsonStringEnumMemberName("azure-container-apps")] AzureContainerApps,
     [JsonStringEnumMemberName("both")] Both,
+    [JsonStringEnumMemberName("local")] Local,
 }
 
 /// <summary>Step 6 judge. TS: <c>JudgeProvider</c>.</summary>
