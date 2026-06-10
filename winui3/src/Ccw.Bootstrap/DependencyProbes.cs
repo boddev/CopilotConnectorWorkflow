@@ -23,7 +23,9 @@
 
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
+using Ccw.Core.Util;
 
 namespace Ccw.Bootstrap;
 
@@ -71,18 +73,30 @@ public static class DependencyProbes
     public static IReadOnlyList<DependencyProbeResult> ProbeAll(BootstrapOptions? options = null)
     {
         options ??= new BootstrapOptions();
+        AppLogger.Log("ProbeAll: begin");
         var gh = ProbeGh();
-        return new[]
+        AppLogger.Log("ProbeAll: gh probed");
+        var results = new[]
         {
-            ProbeNode(),
-            ProbeGit(),
-            ProbeAzureCli(),
-            ProbeAtk(),
+            LogProbe("node", ProbeNode),
+            LogProbe("git", ProbeGit),
+            LogProbe("az", ProbeAzureCli),
+            LogProbe("atk", ProbeAtk),
             gh,
-            ProbeGhCopilotExtension(gh),
-            ProbeEvaluationCli(options),
-            ProbeCopilotConnectorSkill(options),
+            LogProbe("gh-copilot", () => ProbeGhCopilotExtension(gh)),
+            LogProbe("evaluation-cli", () => ProbeEvaluationCli(options)),
+            LogProbe("copilot-connector-skill", () => ProbeCopilotConnectorSkill(options)),
         };
+        AppLogger.Log("ProbeAll: complete");
+        return results;
+    }
+
+    private static DependencyProbeResult LogProbe(string name, Func<DependencyProbeResult> probe)
+    {
+        AppLogger.Log($"ProbeAll: probing {name}");
+        var result = probe();
+        AppLogger.Log($"ProbeAll: {name} -> present={result.Present}");
+        return result;
     }
 
     public static DependencyProbeResult ProbeNode()
@@ -270,77 +284,111 @@ public static class DependencyProbes
     /// .cmd directly with UseShellExecute=false.</summary>
     internal static (bool Ok, string? Path, string? Output) TryRunCapturingOutput(string fileName, string args, int timeoutMs = 15000)
     {
+        var resolved = WhichOnPath(fileName);
+        var actual = resolved ?? fileName;
+        var ext = Path.GetExtension(actual);
+        var isCmdShim = ext.Equals(".cmd", StringComparison.OrdinalIgnoreCase)
+                      || ext.Equals(".bat", StringComparison.OrdinalIgnoreCase);
+
         try
         {
-            var resolved = WhichOnPath(fileName);
-            var actual = resolved ?? fileName;
-            var ext = Path.GetExtension(actual);
-            var isCmdShim = ext.Equals(".cmd", StringComparison.OrdinalIgnoreCase)
-                         || ext.Equals(".bat", StringComparison.OrdinalIgnoreCase);
             ProcessStartInfo psi;
             if (isCmdShim)
             {
                 psi = new ProcessStartInfo
                 {
                     FileName = "cmd.exe",
-                    Arguments = "/c \"\"" + actual + "\" " + args + "\"",
                     RedirectStandardInput = true,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     UseShellExecute = false,
                     CreateNoWindow = true,
                 };
+                psi.ArgumentList.Add("/c");
+                psi.ArgumentList.Add($"\"{actual}\" {args}");
             }
             else
             {
                 psi = new ProcessStartInfo
                 {
                     FileName = actual,
-                    Arguments = args,
                     RedirectStandardInput = true,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     UseShellExecute = false,
                     CreateNoWindow = true,
                 };
+                foreach (var arg in SplitCommandLine(args))
+                {
+                    psi.ArgumentList.Add(arg);
+                }
             }
-            using var p = Process.Start(psi);
-            if (p is null) return (false, null, null);
+
+            using var p = Process.Start(psi) ?? throw new InvalidOperationException("Process.Start returned null.");
             try { p.StandardInput.Close(); } catch { /* best-effort */ }
 
-            // Concurrent reads so a full stderr buffer can't deadlock waiting on stdout.
             var stdoutTask = p.StandardOutput.ReadToEndAsync();
             var stderrTask = p.StandardError.ReadToEndAsync();
             using var cts = new System.Threading.CancellationTokenSource(timeoutMs);
-            var waitTask = p.WaitForExitAsync(cts.Token);
             try
             {
-                waitTask.GetAwaiter().GetResult();
+                p.WaitForExitAsync(cts.Token).GetAwaiter().GetResult();
             }
             catch (OperationCanceledException)
             {
                 try { p.Kill(true); } catch { /* best-effort */ }
+                AppLogger.Log($"Dependency probe timed out: {fileName} {args}", null, nameof(TryRunCapturingOutput));
                 return (false, resolved, null);
             }
+
             string stdout, stderr;
             try { stdout = stdoutTask.GetAwaiter().GetResult(); } catch { stdout = ""; }
             try { stderr = stderrTask.GetAwaiter().GetResult(); } catch { stderr = ""; }
-            if (p.ExitCode != 0) return (false, resolved, null);
+
+            if (p.ExitCode != 0)
+            {
+                AppLogger.Log($"Dependency probe exited with code {p.ExitCode}: {fileName} {args}", null, nameof(TryRunCapturingOutput));
+                return (false, resolved, null);
+            }
+
             return (true, resolved, string.IsNullOrEmpty(stdout) ? stderr : stdout);
         }
-        catch (System.ComponentModel.Win32Exception)
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException or IOException or ArgumentException)
         {
-            return (false, null, null);
-        }
-        catch (InvalidOperationException)
-        {
-            return (false, null, null);
-        }
-        catch (IOException)
-        {
-            return (false, null, null);
+            AppLogger.Log($"Dependency probe failed: {fileName} {args}", ex, nameof(TryRunCapturingOutput));
+            return (false, resolved, null);
         }
     }
+
+    internal static string[] SplitCommandLine(string commandLine)
+    {
+        if (string.IsNullOrWhiteSpace(commandLine)) return [];
+
+        var argv = CommandLineToArgvW(commandLine, out var argc);
+        if (argv == IntPtr.Zero || argc == 0)
+            return [commandLine];
+
+        try
+        {
+            var result = new string[argc];
+            for (var i = 0; i < argc; i++)
+            {
+                var ptr = Marshal.ReadIntPtr(argv, i * IntPtr.Size);
+                result[i] = Marshal.PtrToStringUni(ptr) ?? string.Empty;
+            }
+            return result;
+        }
+        finally
+        {
+            LocalFree(argv);
+        }
+    }
+
+    [DllImport("shell32.dll", SetLastError = true)]
+    private static extern IntPtr CommandLineToArgvW([MarshalAs(UnmanagedType.LPWStr)] string lpCmdLine, out int pNumArgs);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr LocalFree(IntPtr hMem);
 
     /// <summary>PATH lookup with all PATHEXT extensions. Returns null when
     /// nothing matches. Mirrors `where.exe` semantics enough for the probes.</summary>

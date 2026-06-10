@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using Ccw.Core.Util;
 using Ccw.UI.Services;
 using Ccw.UI.Views;
 using Microsoft.UI.Dispatching;
@@ -55,15 +56,28 @@ public partial class App : Application
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
-        _shell = new ShellWindow();
-        _shell.Activate();
+        try
+        {
+            AppLogger.Log("Startup phase: OnLaunched entered");
+            _shell = new ShellWindow();
+            AppLogger.Log("Startup phase: ShellWindow constructed");
+            _shell.Activate();
+            AppLogger.Log("Startup phase: ShellWindow activated");
 
-        // Handle the cold-start activation (file open / protocol etc.).
-        var activation = AppInstance.GetCurrent().GetActivatedEventArgs();
-        RouteActivation(activation);
+            // Handle the cold-start activation (file open / protocol etc.).
+            var activation = AppInstance.GetCurrent().GetActivatedEventArgs();
+            RouteActivation(activation);
 
-        // Drain any reactivations that arrived during cold-start.
-        DrainPendingActivations();
+            // Drain any reactivations that arrived during cold-start.
+            DrainPendingActivations();
+            AppLogger.Log("Startup phase: OnLaunched completed");
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Log("OnLaunched failed", ex);
+            Debug.WriteLine($"OnLaunched failed: {ex}");
+            throw;
+        }
     }
 
     /// <summary>Called by Program.cs on every re-activation (a 2nd
@@ -86,8 +100,16 @@ public partial class App : Application
         }
         dq.TryEnqueue(DispatcherQueuePriority.Normal, () =>
         {
-            app._shell?.BringToFront();
-            app.RouteActivation(e);
+            try
+            {
+                app._shell?.BringToFront();
+                app.RouteActivation(e);
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Log("Reactivation dispatch failed", ex);
+                Debug.WriteLine($"Reactivation dispatch failed: {ex}");
+            }
         });
     }
 
@@ -112,8 +134,16 @@ public partial class App : Application
                 var captured = args;
                 dq.TryEnqueue(DispatcherQueuePriority.Normal, () =>
                 {
-                    _shell?.BringToFront();
-                    RouteActivation(captured);
+                    try
+                    {
+                        _shell?.BringToFront();
+                        RouteActivation(captured);
+                    }
+                    catch (Exception ex)
+                    {
+                        AppLogger.Log("Pending activation dispatch failed", ex);
+                        Debug.WriteLine($"Pending activation dispatch failed: {ex}");
+                    }
                 });
             }
         }
@@ -134,12 +164,14 @@ public partial class App : Application
         }
         catch (Exception ex)
         {
+            AppLogger.Log("RouteActivation failed", ex);
             Debug.WriteLine($"RouteActivation failed: {ex}");
         }
     }
 
     private static void OnUnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
     {
+        AppLogger.Log("Unhandled app exception", e.Exception);
         Debug.WriteLine($"Unhandled: {e.Exception}");
         // Phase 5 reviewer (Opus N1): re-throw under debugger so hard bugs surface.
         if (Debugger.IsAttached) return;

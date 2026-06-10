@@ -42,7 +42,7 @@
                         </StackPanel>
                         <ProgressRing Grid.Column="1" IsActive="{x:Bind Busy, Mode=OneWay}" Width="18" Height="18"/>
                         <HyperlinkButton Grid.Column="2"
-                                         NavigateUri="{x:Bind ManualLink, Mode=OneTime, FallbackValue=''}"
+                                         NavigateUri="{x:Bind ManualLinkUri, Mode=OneTime}"
                                          Content="Docs"
                                          Visibility="{x:Bind HasManualLink, Mode=OneTime}"/>
                     </Grid>

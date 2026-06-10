@@ -11,11 +11,13 @@ public sealed partial class ShellWindow : Window
     public ShellWindow()
     {
         InitializeComponent();
+        Ccw.Core.Util.AppLogger.Log("Startup phase: ShellWindow.InitializeComponent done");
 
         // Mica backdrop per plan §5a. Falls back silently on older OS.
         try { SystemBackdrop = new MicaBackdrop(); } catch { }
 
         RootFrame.Navigate(typeof(MainShell));
+        Ccw.Core.Util.AppLogger.Log("Startup phase: ShellWindow navigated to MainShell");
     }
 
     public void BringToFront()
