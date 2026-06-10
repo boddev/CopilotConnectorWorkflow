@@ -38,6 +38,15 @@ function busFor(jobId: string): EventEmitter {
 function registerJobRoutes(app: Application): void {
   app.get('/api/tools', (_req, res) => res.json(probeTools()));
 
+  app.post('/api/browse-folder', async (_req, res) => {
+    try {
+      const picked = await pickFolderNative();
+      res.json({ path: picked || '', canceled: !picked });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || String(e) });
+    }
+  });
+
   app.get('/api/jobs', (req, res) => {
     const scored = req.query.scored === 'true' || req.query.scored === '1';
     const provisionOnly = req.query.provisionOnly === 'true' || req.query.provisionOnly === '1';
@@ -64,6 +73,22 @@ function registerJobRoutes(app: Application): void {
         forceAll?: boolean; forceSteps?: StepName[]; startAt?: StepName; stopAfter?: StepName;
       };
       if (cfg.dataset) cfg.dataset = path.resolve(cfg.dataset);
+
+      // In-app client secret: the GUI can submit the raw Graph app secret in the
+      // request body. We deliberately keep it OUT of the persisted job.json —
+      // instead we stash it in this server process's environment under a
+      // generated name and point auth.clientSecretEnvVar at it. The existing
+      // provision/ingest plumbing (step5 buildProvisionEnv) then injects
+      // CLIENT_SECRET into the connector child process when data is pushed. The
+      // plaintext secret only ever lives in memory for this server's lifetime.
+      const rawSecret = typeof body.secret === 'string' ? body.secret.trim() : '';
+      if (rawSecret) {
+        cfg.auth = { ...(cfg.auth || {}) };
+        const envName = `CCW_SECRET_${require('crypto').randomBytes(6).toString('hex')}`;
+        process.env[envName] = rawSecret;
+        cfg.auth.clientSecretEnvVar = envName;
+      }
+
       const job = createJob(cfg);
       res.json(job);
       runPipelineForJob(job, runtime).catch((e) => console.error(`[${job.id}] runPipeline error:`, e));
@@ -120,14 +145,25 @@ function registerJobRoutes(app: Application): void {
 
 function registerAuthRoutes(app: Application): void {
   app.post('/api/auth-preflight', async (req, res) => {
+    const body = req.body || {};
+    // In-app client secret: accept a raw secret and expose it to the preflight
+    // via a short-lived generated env var, cleaned up in the finally block so
+    // the plaintext never lingers in this process's environment.
+    let tempEnvVar: string | undefined;
+    let clientSecretEnvVar: string | undefined = body.clientSecretEnvVar;
+    const rawSecret = typeof body.clientSecret === 'string' ? body.clientSecret.trim() : '';
+    if (rawSecret) {
+      tempEnvVar = `CCW_SECRET_PRE_${require('crypto').randomBytes(6).toString('hex')}`;
+      process.env[tempEnvVar] = rawSecret;
+      clientSecretEnvVar = tempEnvVar;
+    }
     try {
       // Lazy import so the auth-preflight module isn't loaded unless used.
       const { runAuthPreflight } = await import('./auth-preflight');
-      const body = req.body || {};
       const result = await runAuthPreflight({
         tenantId: body.tenantId,
         clientId: body.clientId,
-        clientSecretEnvVar: body.clientSecretEnvVar,
+        clientSecretEnvVar,
         useManagedIdentity: !!body.useManagedIdentity,
         runGraph: body.runGraph !== false,
         runWorkIq: body.runWorkIq !== false,
@@ -136,6 +172,8 @@ function registerAuthRoutes(app: Application): void {
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: e?.message || String(e) });
+    } finally {
+      if (tempEnvVar) delete process.env[tempEnvVar];
     }
   });
 }
@@ -224,6 +262,49 @@ async function runPipelineForJob(job: JobRecord, opts?: { forceAll?: boolean; fo
   const tools = resolveTools();
   const bus = busFor(job.id);
   await runPipeline({ job, tools, emitter: bus, ...opts });
+}
+
+/**
+ * Spawn a native OS folder picker and resolve with the selected absolute path
+ * (empty string if the user cancels). The server only ever runs on localhost,
+ * so the picker appears on the same machine as the browser. On Windows we drive
+ * a WinForms FolderBrowserDialog via PowerShell (STA + TopMost owner so it
+ * surfaces above the browser). Non-Windows platforms are unsupported here — the
+ * GUI falls back to manual path entry.
+ */
+function pickFolderNative(): Promise<string> {
+  if (process.platform !== 'win32') {
+    return Promise.reject(new Error('Native folder picker is only available on Windows; type the dataset path manually.'));
+  }
+  const ps = [
+    'Add-Type -AssemblyName System.Windows.Forms;',
+    'Add-Type -AssemblyName System.Drawing;',
+    '$owner = New-Object System.Windows.Forms.Form;',
+    '$owner.TopMost = $true; $owner.ShowInTaskbar = $false;',
+    '$owner.StartPosition = "CenterScreen"; $owner.Size = New-Object System.Drawing.Size(1,1);',
+    '$owner.Show(); $owner.Activate(); $owner.Hide();',
+    '$dlg = New-Object System.Windows.Forms.FolderBrowserDialog;',
+    '$dlg.Description = "Select the folder containing your dataset";',
+    '$dlg.ShowNewFolderButton = $true;',
+    'if ($dlg.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($dlg.SelectedPath) };',
+    '$owner.Dispose();',
+  ].join(' ');
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      'powershell.exe',
+      ['-NoProfile', '-STA', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', ps],
+      { windowsHide: true }
+    );
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (d) => (out += d.toString()));
+    child.stderr.on('data', (d) => (err += d.toString()));
+    child.on('error', (e) => reject(e));
+    child.on('close', (code) => {
+      if (code === 0) resolve(out.trim());
+      else reject(new Error(err.trim() || `folder picker exited with code ${code}`));
+    });
+  });
 }
 
 function openBrowser(url: string): void {

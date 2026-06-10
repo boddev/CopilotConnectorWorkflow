@@ -190,6 +190,69 @@ describe('POST /api/jobs validation', () => {
       fs.rmSync(datasetDir, { recursive: true, force: true });
     }
   });
+
+  it('auto-generates blank connector fields from the dataset folder', async () => {
+    const datasetDir = path.join(workspaceRoot(), uniqueId('autoGenDs'));
+    fs.mkdirSync(datasetDir, { recursive: true });
+    fs.writeFileSync(path.join(datasetDir, 'sample.csv'), 'id,name\n1,Alpha\n');
+    try {
+      const res = await request(app).post('/api/jobs').send({
+        config: {
+          dataset: datasetDir,
+          description: '',
+          count: 10,
+          connectorId: '',
+          connectorName: '',
+          deployTarget: 'azure-functions',
+          mode: 'build',
+          aclMode: 'everyone',
+          noEnhance: true,
+        },
+        runtime: { forceAll: true, startAt: 'enhance', stopAfter: 'enhance' },
+      });
+      expect(res.status).toBe(200);
+      expect(res.body.config.connectorId).toMatch(/^[a-zA-Z0-9]{3,128}$/);
+      expect((res.body.config.connectorName || '').length).toBeGreaterThan(0);
+      expect((res.body.config.description || '').length).toBeGreaterThanOrEqual(10);
+      fs.rmSync(res.body.workspace, { recursive: true, force: true });
+    } finally {
+      fs.rmSync(datasetDir, { recursive: true, force: true });
+    }
+  });
+
+  it('injects an in-app client secret into env without persisting it to job.json', async () => {
+    const datasetDir = path.join(workspaceRoot(), uniqueId('secretDs'));
+    fs.mkdirSync(datasetDir, { recursive: true });
+    fs.writeFileSync(path.join(datasetDir, 'sample.csv'), 'id,name\n1,Alpha\n');
+    try {
+      const res = await request(app).post('/api/jobs').send({
+        config: {
+          dataset: datasetDir,
+          description: 'a sufficiently long description for validation',
+          count: 10,
+          connectorId: 'secretshape',
+          connectorName: 'Secret Shape',
+          deployTarget: 'azure-functions',
+          mode: 'build',
+          aclMode: 'everyone',
+          noEnhance: true,
+        },
+        secret: 'super-secret-value-123',
+        runtime: { forceAll: true, startAt: 'enhance', stopAfter: 'enhance' },
+      });
+      expect(res.status).toBe(200);
+      const envVar = res.body.config.auth?.clientSecretEnvVar;
+      expect(envVar).toMatch(/^CCW_SECRET_/);
+      expect(process.env[envVar]).toBe('super-secret-value-123');
+      // The plaintext secret must never be written to the persisted job record.
+      const persisted = fs.readFileSync(path.join(res.body.workspace, 'job.json'), 'utf-8');
+      expect(persisted).not.toContain('super-secret-value-123');
+      delete process.env[envVar];
+      fs.rmSync(res.body.workspace, { recursive: true, force: true });
+    } finally {
+      fs.rmSync(datasetDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('POST /api/auth-preflight', () => {
