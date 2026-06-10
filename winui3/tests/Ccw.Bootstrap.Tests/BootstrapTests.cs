@@ -21,6 +21,36 @@ public sealed class DependencyProbeCommandLineTests
         Assert.Equal("extension", args[1]);
         Assert.Equal("list", args[2]);
     }
+
+    // Regression: az.cmd / atk.cmd (npm/Azure shims) were falsely reported as
+    // "not installed" because the cmd.exe invocation built the command via
+    // ArgumentList with embedded quotes, which .NET escaping + cmd parsing
+    // mangled into an immediate exit-1. The shim path here contains a space to
+    // reproduce the exact quoting failure; the fix must run it and capture the
+    // echoed token. Windows-only (cmd.exe).
+    [Fact]
+    public void TryRunCapturingOutput_RunsCmdShim_WithSpacesInPath()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        var dir = Path.Combine(Path.GetTempPath(), "ccw probe test " + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var shim = Path.Combine(dir, "fake-cli.cmd");
+        try
+        {
+            File.WriteAllText(shim, "@echo off\r\necho SHIM_OK_%1\r\n");
+
+            var (ok, resolved, output) = DependencyProbes.TryRunCapturingOutput(shim, "1.2.3");
+
+            Assert.True(ok, $"expected cmd shim to run; output={output ?? "<null>"}");
+            Assert.Equal(shim, resolved);
+            Assert.Contains("SHIM_OK_1.2.3", output ?? "", StringComparison.Ordinal);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best-effort */ }
+        }
+    }
 }
 
 public sealed class SemverCompareTests

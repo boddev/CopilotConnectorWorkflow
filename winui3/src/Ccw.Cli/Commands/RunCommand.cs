@@ -183,6 +183,7 @@ internal static class RunCommand
             "azure-functions" or null => DeployTarget.AzureFunctions,
             "azure-container-apps" => DeployTarget.AzureContainerApps,
             "both" => DeployTarget.Both,
+            "local" => DeployTarget.Local,
             var x => throw new ArgumentException($"invalid --deploy-target: {x}"),
         };
         var aclMode = args.Flag("acl-mode") switch
