@@ -11,7 +11,14 @@
                        Text="Configure a CCW pipeline. Today this scaffolds the job record; running the full pipeline from the UI lands as the New Job form (plan §5b) once the v1 enhancer shim path completes. Until then, use ccw.exe to run the pipeline." />
 
             <TextBlock Text="Dataset path" FontWeight="SemiBold"/>
-            <TextBox x:Name="DatasetBox" PlaceholderText="C:\path\to\dataset (folder or .csv)"/>
+            <Grid ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBox x:Name="DatasetBox" Grid.Column="0" PlaceholderText="C:\path\to\dataset (folder or .csv)"/>
+                <Button x:Name="BrowseButton" Grid.Column="1" Content="Browse&#8230;" Click="Browse_Click"/>
+            </Grid>
 
             <TextBlock Text="Description (optional)" FontWeight="SemiBold"/>
             <TextBlock TextWrapping="Wrap" FontSize="12"
@@ -41,6 +48,42 @@
             </ComboBox>
 
             <CheckBox x:Name="NoEnhanceBox" Content="Skip Step 2 enhancement (identity transform only)"/>
+
+            <TextBlock Text="Run mode" FontWeight="SemiBold" Margin="0,8,0,0"/>
+            <ComboBox x:Name="ModeBox" SelectedIndex="0" SelectionChanged="Mode_SelectionChanged">
+                <ComboBoxItem Content="build"/>
+                <ComboBoxItem Content="provision"/>
+            </ComboBox>
+            <TextBlock TextWrapping="Wrap" FontSize="12"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       Text="Build scaffolds and transforms the dataset locally. Provision pushes the connector and data to a Microsoft tenant, which requires the app credentials below." />
+
+            <StackPanel x:Name="AuthPanel" Spacing="12" Visibility="Collapsed"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
+                        CornerRadius="6" Padding="16" Margin="0,4,0,0">
+                <TextBlock Text="Tenant credentials" FontWeight="SemiBold"/>
+                <TextBlock TextWrapping="Wrap" FontSize="12"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                           Text="Authenticates the connector when pushing to your tenant. The secret is stored in a user environment variable and read by the connector at push time — it is never written to the job record." />
+                <TextBlock Text="Tenant ID"/>
+                <TextBox x:Name="TenantIdBox" PlaceholderText="00000000-0000-0000-0000-000000000000"/>
+                <TextBlock Text="Client ID"/>
+                <TextBox x:Name="ClientIdBox" PlaceholderText="Application (client) ID"/>
+                <CheckBox x:Name="UseManagedIdentityBox" Content="Use managed identity (no client secret)"
+                          Checked="UseManagedIdentity_Toggled" Unchecked="UseManagedIdentity_Toggled"/>
+                <StackPanel x:Name="SecretPanel" Spacing="12">
+                    <TextBlock Text="Client secret"/>
+                    <PasswordBox x:Name="ClientSecretBox" PlaceholderText="Client secret value"/>
+                    <TextBlock Text="Secret environment variable name (optional)"/>
+                    <TextBox x:Name="ClientSecretEnvVarBox" PlaceholderText="CCW_CLIENT_SECRET"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <Button x:Name="ValidateAuthButton" Content="Validate auth" Click="ValidateAuth_Click"/>
+                    <ProgressRing x:Name="ValidateRing" IsActive="False" Width="20" Height="20"/>
+                </StackPanel>
+                <TextBlock x:Name="AuthStatusText" TextWrapping="Wrap"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+            </StackPanel>
 
             <Button Content="Create job record" Click="Create_Click" Margin="0,12,0,0"/>
             <TextBlock x:Name="StatusText" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
