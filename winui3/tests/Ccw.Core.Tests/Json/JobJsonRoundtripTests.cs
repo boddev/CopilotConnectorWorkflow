@@ -87,6 +87,24 @@ public class JobJsonRoundtripTests
     }
 
     [Fact]
+    public void LocalDeployTarget_Serializes_AsLocalString()
+    {
+        // Parity contract: DeployTarget.Local must serialize to the TS literal
+        // 'local' (src/types.ts), never an integer, so job.json round-trips
+        // through the Node CCW and the parity harness.
+        var record = MinimalJob() with
+        {
+            Config = MinimalConfig() with { DeployTarget = DeployTarget.Local },
+        };
+
+        var json = JsonSerializer.Serialize(record, CcwJsonOptions.Default);
+        Assert.Contains("\"deployTarget\":\"local\"", json, StringComparison.Ordinal);
+
+        var back = JsonSerializer.Deserialize<JobRecord>(json, CcwJsonOptions.Default);
+        Assert.Equal(DeployTarget.Local, back!.Config.DeployTarget);
+    }
+
+    [Fact]
     public void AbsentOptionals_AreOmitted_NotSerializedAsNull()
     {
         // JSON.stringify omits undefined fields entirely. STJ's default would

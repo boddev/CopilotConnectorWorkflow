@@ -6,7 +6,7 @@ export type JobStatus = 'pending' | 'running' | 'done' | 'failed' | 'cancelled';
 
 export type RunMode = 'build' | 'provision';
 
-export type DeployTarget = 'azure-functions' | 'azure-container-apps' | 'both';
+export type DeployTarget = 'azure-functions' | 'azure-container-apps' | 'both' | 'local';
 
 export interface AuthConfig {
   tenantId?: string;

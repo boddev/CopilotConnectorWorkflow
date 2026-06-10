@@ -178,7 +178,14 @@ export async function runStep5Deploy(opts: RunStepOptions): Promise<StepRecord> 
   //    in via `atk auth login m365`. Fall back to the manual-step marker if
   //    `atk` is unavailable or publish fails.
   const candidateFromConfig = job.config.score?.candidateAgentId;
-  if (candidateFromConfig) {
+  if (target === 'local') {
+    // Local test target: the goal is to create the external connection and
+    // upload (ingest) data so the connector can be exercised locally — exactly
+    // like running the CLI repeatedly against a tenant. No Azure deploy
+    // artifacts are rendered (the azure-* branches above are skipped) and the
+    // M365 agent is not published; Step 6 scoring is out of scope for local.
+    rec.diagnostics?.push('deploy target: local — connector provisioned and data ingested; Azure deploy artifacts and agent publish skipped (local test mode)');
+  } else if (candidateFromConfig) {
     lifecycleResources.agentId = candidateFromConfig;
     lifecycleResources.publishedAt = new Date().toISOString();
     rec.diagnostics?.push(`using pre-existing candidate agent id from config: ${candidateFromConfig}`);

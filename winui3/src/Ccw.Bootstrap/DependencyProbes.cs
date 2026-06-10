@@ -295,17 +295,22 @@ public static class DependencyProbes
             ProcessStartInfo psi;
             if (isCmdShim)
             {
+                // Use the raw Arguments string (NOT ArgumentList) for cmd.exe shims.
+                // .NET escapes each ArgumentList entry independently, which mangles the
+                // embedded quotes around the shim path and makes cmd.exe fail immediately
+                // (exit 1, no output) -- this is why az.cmd / atk.cmd were falsely reported
+                // as "not installed". cmd's `/s` strips exactly the first and last quote of
+                // the remaining string, so `/s /c ""<path>" <args>"` runs `"<path>" <args>`.
                 psi = new ProcessStartInfo
                 {
                     FileName = "cmd.exe",
+                    Arguments = $"/s /c \"\"{actual}\" {args}\"",
                     RedirectStandardInput = true,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     UseShellExecute = false,
                     CreateNoWindow = true,
                 };
-                psi.ArgumentList.Add("/c");
-                psi.ArgumentList.Add($"\"{actual}\" {args}");
             }
             else
             {
