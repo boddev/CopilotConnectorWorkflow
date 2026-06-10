@@ -15,6 +15,9 @@ legend { padding: 0 4px; font-size: 0.8rem; color: #555; }
 .hint { font-size: 0.75rem; color: #555; margin: 4px 0 0; }
 button { background: #0f4c81; color: white; border: 0; padding: 8px 16px; border-radius: 3px; cursor: pointer; margin-top: 8px; }
 button:hover { background: #0d3e6a; }
+.input-with-button { display: flex; gap: 6px; align-items: stretch; }
+.input-with-button input { flex: 1; }
+.input-with-button button { margin-top: 0; white-space: nowrap; }
 #jobs { list-style: none; padding: 0; margin: 0; }
 #jobs li { padding: 6px 8px; border-bottom: 1px solid #eee; cursor: pointer; font-size: 0.85rem; }
 #jobs li:hover { background: #f0f4f8; }

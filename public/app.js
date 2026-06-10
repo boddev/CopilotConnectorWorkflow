@@ -40,6 +40,7 @@
         const tenantId = form.querySelector('[name=tenantId]')?.value || '';
         const clientId = form.querySelector('[name=clientId]')?.value || '';
         const clientSecretEnvVar = form.querySelector('[name=clientSecretEnvVar]')?.value || '';
+        const clientSecret = form.querySelector('[name=clientSecret]')?.value || '';
         const useManagedIdentity = form.querySelector('[name=useManagedIdentity]')?.checked || false;
         const skipWorkiq = form.querySelector('[name=skipWorkiqAuth]')?.checked || false;
         const r = await fetch('/api/auth-preflight', {
@@ -49,6 +50,7 @@
             tenantId,
             clientId,
             clientSecretEnvVar,
+            clientSecret: clientSecret || undefined,
             useManagedIdentity,
             runGraph: true,
             runWorkIq: !skipWorkiq,
@@ -58,6 +60,31 @@
         out.textContent = JSON.stringify(body, null, 2);
       } catch (e) {
         out.textContent = 'Error: ' + (e.message || e);
+      }
+    });
+  }
+
+  // ----- Browse for a dataset folder (native OS picker via the local server) -----
+  const browseDatasetBtn = document.getElementById('browse-dataset-btn');
+  if (browseDatasetBtn) {
+    browseDatasetBtn.addEventListener('click', async () => {
+      const datasetInput = form.querySelector('[name=dataset]');
+      const prevLabel = browseDatasetBtn.textContent;
+      browseDatasetBtn.disabled = true;
+      browseDatasetBtn.textContent = 'Opening…';
+      try {
+        const r = await fetch('/api/browse-folder', { method: 'POST' });
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) { alert('Could not open folder picker: ' + (body.error || r.status)); return; }
+        if (body.path) {
+          datasetInput.value = body.path;
+          datasetInput.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      } catch (e) {
+        alert('Could not open folder picker: ' + (e.message || e));
+      } finally {
+        browseDatasetBtn.disabled = false;
+        browseDatasetBtn.textContent = prevLabel;
       }
     });
   }
@@ -258,7 +285,6 @@
         clientSecretEnvVar: data.clientSecretEnvVar || undefined,
         useManagedIdentity: form.querySelector('[name=useManagedIdentity]').checked,
       };
-
       // Slice 4: build payload.score with mirror-CLI validation.
       const judgeProvider = (data.judgeProvider || 'github-copilot').trim();
       const judgeAgentId = (data.judgeAgentId || '').trim();
@@ -303,6 +329,7 @@
           tenantId: payload.auth?.tenantId,
           clientId: payload.auth?.clientId,
           clientSecretEnvVar: payload.auth?.clientSecretEnvVar,
+          clientSecret: (data.clientSecret || '').trim() || undefined,
           useManagedIdentity: payload.auth?.useManagedIdentity,
           runGraph: payload.mode === 'provision',
           runWorkIq: !skipWorkiqAuth,
@@ -320,7 +347,7 @@
     const r = await fetch('/api/jobs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ config: payload, runtime }),
+      body: JSON.stringify({ config: payload, runtime, secret: (data.clientSecret || '').trim() || undefined }),
     });
     if (!r.ok) { const err = await r.json().catch(() => ({})); alert('Failed: ' + (err.error || r.status)); return; }
     const job = await r.json();

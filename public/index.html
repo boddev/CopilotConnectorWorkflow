@@ -14,12 +14,17 @@
     <section id="new-job">
       <h2>New job</h2>
       <form id="job-form">
-        <label>Dataset path<input name="dataset" required placeholder="C:\path\to\dataset"></label>
-        <label>Description<textarea name="description" required rows="3" placeholder="What does this dataset contain?"></textarea></label>
+        <label>Dataset path
+          <span class="input-with-button">
+            <input name="dataset" required placeholder="C:\path\to\dataset">
+            <button type="button" id="browse-dataset-btn">Browse…</button>
+          </span>
+        </label>
+        <label>Description (optional — auto-generated if blank)<textarea name="description" rows="3" placeholder="Auto-generated from the dataset folder name if left blank"></textarea></label>
         <label>Eval prompts<input name="count" type="number" value="30" min="5" max="50"></label>
         <label>File extensions (optional, comma-separated)<input name="extensions" placeholder="csv,json"></label>
-        <label>Connector ID<input name="connectorId" required placeholder="myconnector123" pattern="[A-Za-z0-9]{3,128}"></label>
-        <label>Connector display name<input name="connectorName" required placeholder="My Connector"></label>
+        <label>Connector ID (optional — auto-generated if blank)<input name="connectorId" placeholder="myconnector123" pattern="[A-Za-z0-9]{3,128}"></label>
+        <label>Connector display name (optional — auto-generated if blank)<input name="connectorName" placeholder="My Connector"></label>
         <label>Connector description (optional)<textarea name="connectorDescription" rows="2"></textarea></label>
         <label>Deploy target
           <select name="deployTarget">
@@ -86,8 +91,9 @@
           <label>Tenant ID<input name="tenantId"></label>
           <label>Client ID<input name="clientId"></label>
           <label>Client secret env var<input name="clientSecretEnvVar" placeholder="MY_CONNECTOR_SECRET"></label>
+          <label>Client secret (entered here, not stored on disk)<input name="clientSecret" type="password" autocomplete="off" placeholder="paste the app client secret"></label>
           <label><input name="useManagedIdentity" type="checkbox"> Use managed identity</label>
-          <p class="hint">Required Graph permissions (application + admin consent):
+          <p class="hint">Provide credentials one of two ways: paste the <strong>client secret</strong> above (kept only in the server's memory for this run and injected into the connector when data is pushed), or reference an existing OS environment variable by name. Required Graph permissions (application + admin consent):
             <code>ExternalConnection.ReadWrite.OwnedBy</code>,
             <code>ExternalItem.ReadWrite.OwnedBy</code>.</p>
           <button type="button" id="validate-auth-btn">Validate auth</button>
