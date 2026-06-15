@@ -18,7 +18,7 @@
                     IsEnabled="{x:Bind ViewModel.CanRun, Mode=OneWay}"/>
             <Button Content="Cancel"
                     Command="{x:Bind ViewModel.CancelCommand}"
-                    Visibility="{x:Bind ViewModel.IsRunning, Mode=OneWay}"/>
+                    Visibility="{x:Bind ViewModel.IsRunning, Mode=OneWay, Converter={StaticResource BoolToVisibility}}"/>
             <ProgressRing IsActive="{x:Bind ViewModel.IsRunning, Mode=OneWay}"
                           Width="20" Height="20"/>
             <TextBlock Text="{x:Bind ViewModel.Status, Mode=OneWay}" VerticalAlignment="Center"/>
@@ -54,14 +54,14 @@
                                          Severity="Error"
                                          Message="{x:Bind ErrorMessage, Mode=OneWay}"/>
                                 <TextBox Text="{x:Bind Output, Mode=OneWay}"
-                                         Visibility="{x:Bind HasOutput, Mode=OneWay}"
+                                         Visibility="{x:Bind HasOutput, Mode=OneWay, Converter={StaticResource BoolToVisibility}}"
                                          IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap"
                                          FontFamily="Consolas, Cascadia Code" FontSize="12"
                                          MaxHeight="280"
                                          ScrollViewer.VerticalScrollBarVisibility="Auto"
                                          ScrollViewer.HorizontalScrollBarVisibility="Auto"/>
                                 <TextBlock Text="No output yet."
-                                           Visibility="{x:Bind HasOutput, Mode=OneWay, Converter={StaticResource NegateBool}}"
+                                           Visibility="{x:Bind HasOutput, Mode=OneWay, Converter={StaticResource BoolToVisibility}, ConverterParameter=Invert}"
                                            Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                            FontStyle="Italic"/>
                             </StackPanel>
