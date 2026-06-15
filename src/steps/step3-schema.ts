@@ -83,7 +83,8 @@ export async function runStep3Schema(opts: RunStepOptions): Promise<StepRecord> 
   rec.diagnostics = issues.map((i) => `[${i.severity}] ${i.message}`);
 
   if (blocking.length > 0) {
-    finishStep(rec, 'failed', `schema validation failed: ${blocking.length} blocking issues`);
+    const detail = blocking.map((i) => i.message).join('; ');
+    finishStep(rec, 'failed', `schema validation failed (${blocking.length} blocking): ${detail}`);
   } else {
     finishStep(rec, 'done');
   }
