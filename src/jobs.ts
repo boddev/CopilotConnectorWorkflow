@@ -5,11 +5,27 @@ import { JobRecord, JobConfig, StepName, StepRecord, ALL_STEPS, PipelineDetectio
 import { hashDataset, hashEvalSetFile } from './canonical-hash';
 import { detectDatasetShape } from './dataset-shape-detect';
 
-const WORKSPACE_ROOT = path.resolve(__dirname, '..', 'workspace', 'jobs');
+const DEFAULT_WORKSPACE_ROOT = path.resolve(__dirname, '..', 'workspace', 'jobs');
+
+/**
+ * Resolve the job-store root. Honors the CCW_WORKSPACE_ROOT environment
+ * variable so an external host can drive this CLI against its own job store.
+ * The WinUI app, for instance, persists jobs under
+ * %LOCALAPPDATA%\CopilotConnectorWorkflow\workspace\jobs and sets this var when
+ * it shells `ccw resume` so `loadJob`/`saveJob`/`listJobs` all operate on the
+ * same store the app reads. Falls back to the repo-relative workspace/jobs.
+ */
+function resolveWorkspaceRoot(): string {
+  const override = process.env.CCW_WORKSPACE_ROOT;
+  return override && override.trim().length > 0
+    ? path.resolve(override.trim())
+    : DEFAULT_WORKSPACE_ROOT;
+}
 
 export function workspaceRoot(): string {
-  if (!fs.existsSync(WORKSPACE_ROOT)) fs.mkdirSync(WORKSPACE_ROOT, { recursive: true });
-  return WORKSPACE_ROOT;
+  const root = resolveWorkspaceRoot();
+  if (!fs.existsSync(root)) fs.mkdirSync(root, { recursive: true });
+  return root;
 }
 
 export function newJobId(): string {

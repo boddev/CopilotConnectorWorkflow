@@ -4,7 +4,23 @@ import * as path from 'path';
 
 /** Resolve sibling project paths relative to the workflow repo. */
 const REPO_ROOT = path.resolve(__dirname, '..');
-const SRC_ROOT = path.resolve(REPO_ROOT, '..');
+
+/**
+ * Root that holds the SIBLING repos (EvaluationCLI, CopilotConnectorSkill).
+ * Honors the CCW_SRC_ROOT environment variable so an external host can point a
+ * bundle built in one location (e.g. a git worktree) at sibling tools that live
+ * elsewhere (e.g. %USERPROFILE%\src). Only sibling lookups use this; the
+ * workflow's OWN assets (templates/, dist/enhancer/) stay relative to the
+ * bundle via REPO_ROOT. Falls back to the parent of the repo root.
+ */
+function resolveSrcRoot(): string {
+  const override = process.env.CCW_SRC_ROOT;
+  return override && override.trim().length > 0
+    ? path.resolve(override.trim())
+    : path.resolve(REPO_ROOT, '..');
+}
+
+const SRC_ROOT = resolveSrcRoot();
 
 export interface ToolPaths {
   evalGen: string;          // path to eval-gen dist/index.js

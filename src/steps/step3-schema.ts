@@ -93,6 +93,14 @@ export async function runStep3Schema(opts: RunStepOptions): Promise<StepRecord> 
 
 interface ValidationIssue { severity: 'error' | 'warning'; message: string }
 
+/**
+ * Microsoft Graph connector reserved property names that cannot be declared as
+ * custom schema properties. `content` is owned by Graph as the item's full-text
+ * content field, so an enhancer that emits a `content` column must not have it
+ * promoted into the schema (it would fail Graph schema registration).
+ */
+const RESERVED_PROPERTY_NAMES = new Set<string>(['content']);
+
 function hardenSchema(suggestionProps: Array<Record<string, unknown>>): GraphConnectorSchema {
   const namesSeen = new Set<string>();
   const labelsSeen = new Set<string>();
@@ -100,6 +108,10 @@ function hardenSchema(suggestionProps: Array<Record<string, unknown>>): GraphCon
   for (const p of suggestionProps) {
     const name = sanitizeName(String(p.name || ''));
     if (!name || namesSeen.has(name)) continue;
+    // Drop Graph-reserved names (e.g. 'content') so the generated schema stays
+    // valid even when the upstream enhancer suggests a reserved column. The
+    // data is still surfaced via the item's content field, not a schema prop.
+    if (RESERVED_PROPERTY_NAMES.has(name.toLowerCase())) continue;
     namesSeen.add(name);
     const type = coerceType(String(p.type || 'String'));
     const isQueryable = bool(p.isQueryable, true);
