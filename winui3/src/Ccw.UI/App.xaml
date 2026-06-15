@@ -9,6 +9,7 @@
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
             </ResourceDictionary.MergedDictionaries>
             <svc:NegateBoolConverter x:Key="NegateBool"/>
+            <svc:BoolToVisibilityConverter x:Key="BoolToVisibility"/>
         </ResourceDictionary>
     </Application.Resources>
 </Application>
