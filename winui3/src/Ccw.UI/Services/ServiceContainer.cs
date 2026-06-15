@@ -16,6 +16,7 @@ internal static class ServiceContainer
         var nav = new NavigationService();
         var theme = new ThemeService();
         var jobs = new JobService();
+        var jobRunner = new JobRunner();
         var diagnostics = new DiagnosticsService();
         var markdown = new MarkdownReportRenderer();
         var fileRouter = new FileActivationRouter(nav, jobs);
@@ -26,6 +27,7 @@ internal static class ServiceContainer
             [typeof(NavigationService)] = nav,
             [typeof(ThemeService)] = theme,
             [typeof(JobService)] = jobs,
+            [typeof(JobRunner)] = jobRunner,
             [typeof(DiagnosticsService)] = diagnostics,
             [typeof(MarkdownReportRenderer)] = markdown,
             [typeof(FileActivationRouter)] = fileRouter,

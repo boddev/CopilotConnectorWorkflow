@@ -12,13 +12,11 @@ public sealed partial class JobDetailPage : Page
     public JobDetailPage()
     {
         InitializeComponent();
-        ViewModel = new JobDetailViewModel(App.GetService<JobService>());
+        ViewModel = new JobDetailViewModel(App.GetService<JobService>(), App.GetService<JobRunner>());
     }
 
     protected override void OnNavigatedTo(NavigationEventArgs e)
     {
         if (e.Parameter is string jobId) ViewModel.Load(jobId);
     }
-
-    private void Refresh_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) => ViewModel.Refresh();
 }
