@@ -83,6 +83,70 @@ function normalizeExtension(value: string): string {
   return value.trim().toLowerCase().replace(/^\./, '');
 }
 
+const TABULAR_DISCOVERY_EXTENSIONS = new Set(['csv', 'tsv']);
+// Mirror the enhancer's eval-set exclusion (enhance_for_copilot.ts datasetFiles)
+// so detection never counts the operator-supplied ground-truth as data.
+const EXCLUDED_DISCOVERY_DIR_NAMES = new Set(['evalset', 'eval-set', 'eval_set', 'workspace', 'node_modules', '.git']);
+const EXCLUDED_DISCOVERY_FILE_PATTERN = /^eval[-_]?set/i;
+
+/**
+ * Detect the data-bearing file extensions actually present in a dataset,
+ * mirroring the enhancer's eval-set exclusion rules. Returns a sorted list of
+ * supported discovery extensions (empty if none / path unreadable).
+ */
+export function detectDatasetExtensions(datasetPath: string): string[] {
+  const resolved = path.resolve(datasetPath);
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(resolved);
+  } catch {
+    return [];
+  }
+  const found = new Set<string>();
+  const consider = (name: string): void => {
+    if (EXCLUDED_DISCOVERY_FILE_PATTERN.test(name)) return;
+    const ext = normalizeExtension(path.extname(name));
+    if (ext && SUPPORTED_DISCOVERY_EXTENSIONS.has(ext)) found.add(ext);
+  };
+  if (stat.isFile()) {
+    consider(path.basename(resolved));
+    return [...found].sort();
+  }
+  const walk = (dir: string): void => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        if (entry.name.startsWith('_') || EXCLUDED_DISCOVERY_DIR_NAMES.has(entry.name.toLowerCase())) continue;
+        walk(path.join(dir, entry.name));
+      } else if (entry.isFile()) {
+        consider(entry.name);
+      }
+    }
+  };
+  walk(resolved);
+  return [...found].sort();
+}
+
+/**
+ * Choose the extensions to pass to the enhancer when the operator did not
+ * specify any. Returns null to keep the enhancer's csv/tsv default — used when
+ * tabular data files are present (preserving established behavior). Returns a
+ * concrete list only when there are non-tabular data files and no tabular data
+ * files, which is exactly the case the csv/tsv default silently drops (e.g. a
+ * dataset of .json documents).
+ */
+export function autoEnhancerExtensions(datasetPath: string): string[] | null {
+  const present = detectDatasetExtensions(datasetPath);
+  if (present.length === 0) return null;
+  if (present.some((e) => TABULAR_DISCOVERY_EXTENSIONS.has(e))) return null;
+  return present;
+}
+
 function collectDatasetFiles(datasetPath: string, extensionFilter?: Set<string>): DatasetFile[] {
   const resolved = path.resolve(datasetPath);
   const stat = fs.statSync(resolved);

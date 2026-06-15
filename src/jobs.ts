@@ -294,6 +294,25 @@ export function dirHash(dir: string): string {
 
 export function objectHash(obj: unknown): string {
   const h = crypto.createHash('sha256');
-  h.update(JSON.stringify(obj, Object.keys(obj as object).sort()));
+  h.update(stableStringify(obj));
   return h.digest('hex').slice(0, 16);
+}
+
+/**
+ * Deterministically serialize a value with recursively sorted object keys so
+ * the hash depends on the actual content and is stable regardless of key
+ * insertion order. (The previous implementation passed the top-level keys as a
+ * JSON.stringify replacer allowlist, which silently stripped all nested input
+ * fields — making every step's input hash a constant and defeating
+ * input-change cache invalidation.)
+ */
+function stableStringify(value: unknown): string {
+  if (value === undefined || typeof value === 'function') return 'null';
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) as string;
+  if (Array.isArray(value)) return '[' + value.map((v) => stableStringify(v)).join(',') + ']';
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj)
+    .filter((k) => obj[k] !== undefined && typeof obj[k] !== 'function')
+    .sort();
+  return '{' + keys.map((k) => JSON.stringify(k) + ':' + stableStringify(obj[k])).join(',') + '}';
 }
